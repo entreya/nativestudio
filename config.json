@@ -1,0 +1,15 @@
+{
+  "port": 8080,
+  "ollama_url": "http://localhost:11434",
+  "default_model": "codellama",
+  "context": {
+    "yellow_threshold": 0.6,
+    "red_threshold": 0.8,
+    "keep_recent_messages": 10,
+    "summarize_using_model": "llama3"
+  },
+  "filesystem": {
+    "root_dir": "./workspace",
+    "allowed_extensions": [".php", ".go", ".js", ".ts", ".py", ".md", ".json", ".yaml"]
+  }
+}
