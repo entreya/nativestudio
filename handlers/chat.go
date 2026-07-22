@@ -1,38 +1,43 @@
 package handlers
 
 import (
-	"bufio"
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"time"
 
+	"github.com/entreya/nativestudio/agent"
 	"github.com/entreya/nativestudio/context"
+	"github.com/entreya/nativestudio/db"
+	"github.com/entreya/nativestudio/editor"
 )
 
-// ChatHandler manages chat requests proxying to Ollama
+// ChatHandler manages chat requests proxying to Ollama via the Agent.
 type ChatHandler struct {
 	OllamaURL  string
 	ContextCfg context.Config
+	Agent      *agent.Agent
+	DB         *db.DB
 }
 
-// NewChatHandler creates a new ChatHandler
-func NewChatHandler(ollamaURL string, ctxCfg context.Config) *ChatHandler {
+// NewChatHandler creates a new ChatHandler.
+func NewChatHandler(ollamaURL string, ctxCfg context.Config, agentRunner *agent.Agent, database *db.DB) *ChatHandler {
 	return &ChatHandler{
 		OllamaURL:  ollamaURL,
 		ContextCfg: ctxCfg,
+		Agent:      agentRunner,
+		DB:         database,
 	}
 }
 
-// RegisterRoutes registers the chat endpoints
+// RegisterRoutes registers the chat endpoints.
 func (h *ChatHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/chat", h.HandleChat)
 	mux.HandleFunc("/api/context", h.GetContext)
 	mux.HandleFunc("/api/context/reset", h.ResetContext)
 }
 
-// HandleChat proxies chat to Ollama with full context management
+// HandleChat proxies chat to Ollama using the agent loop for tool calling.
 func (h *ChatHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -40,9 +45,12 @@ func (h *ChatHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var reqBody struct {
-		Prompt    string `json:"prompt"`
-		Model     string `json:"model"`
-		SessionID string `json:"session_id"`
+		Prompt        string              `json:"prompt"`
+		Model         string              `json:"model"`
+		SessionID     string              `json:"session_id"`
+		Think         bool                `json:"think"`
+		ThinkLevel    string              `json:"think_level"`
+		EditorContext *editor.EditorState `json:"editor_context,omitempty"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
@@ -55,10 +63,24 @@ func (h *ChatHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 1. Get or create session
-	session := context.Store.GetOrCreate(reqBody.SessionID)
+	// Validate session exists in DB — return 400 if not found
+	if _, err := h.DB.GetSession(reqBody.SessionID); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error":   "session_not_found",
+			"message": fmt.Sprintf("session %s not found", reqBody.SessionID),
+		})
+		return
+	}
 
-	// 2. Check token usage
+	// Build editor state from request (zero value if not provided)
+	state := editor.EditorState{}
+	if reqBody.EditorContext != nil {
+		state = *reqBody.EditorContext
+	}
+
+	// Check token usage
 	_, _, pct := context.Store.GetTokenUsage(reqBody.SessionID, reqBody.Model)
 	if context.ShouldBlock(pct, h.ContextCfg) {
 		w.Header().Set("Content-Type", "application/json")
@@ -70,51 +92,15 @@ func (h *ChatHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 3. If ShouldSummarize() -> background goroutine
+	// If approaching context limit, kick off summarization in background
 	if context.ShouldSummarize(pct, h.ContextCfg) {
+		sess := context.Store.GetOrCreate(reqBody.SessionID)
 		go func(s *context.Session, cfg context.Config) {
 			_ = context.Summarize(s, cfg)
-		}(session, h.ContextCfg)
+		}(sess, h.ContextCfg)
 	}
 
-	// 4. Append user message
-	userMsg := context.Message{
-		Role:      "user",
-		Content:   reqBody.Prompt,
-		Timestamp: time.Now(),
-	}
-	context.Store.AppendMessage(reqBody.SessionID, userMsg)
-
-	// 5. Build Ollama request with all messages
-	allMessages := context.Store.GetMessages(reqBody.SessionID)
-	var ollamaMessages []map[string]string
-	for _, m := range allMessages {
-		ollamaMessages = append(ollamaMessages, map[string]string{
-			"role":    m.Role,
-			"content": m.Content,
-		})
-	}
-
-	ollamaReq := map[string]interface{}{
-		"model":    reqBody.Model,
-		"messages": ollamaMessages,
-		"stream":   true,
-	}
-
-	reqBytes, err := json.Marshal(ollamaReq)
-	if err != nil {
-		http.Error(w, "failed to marshal ollama request", http.StatusInternalServerError)
-		return
-	}
-
-	// 6. Proxy and stream
-	resp, err := http.Post(h.OllamaURL+"/api/chat", "application/json", bytes.NewReader(reqBytes))
-	if err != nil {
-		http.Error(w, "failed to reach ollama", http.StatusBadGateway)
-		return
-	}
-	defer resp.Body.Close()
-
+	// Setup SSE
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -125,52 +111,22 @@ func (h *ChatHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var fullAssistantResponse string
-
-	scanner := bufio.NewScanner(resp.Body)
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-
-		var chunk struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-			Done bool `json:"done"`
-		}
-
-		if err := json.Unmarshal(line, &chunk); err != nil {
-			continue
-		}
-
-		fullAssistantResponse += chunk.Message.Content
-
-		sseData := map[string]interface{}{
-			"token": chunk.Message.Content,
-		}
-		sseBytes, _ := json.Marshal(sseData)
-		fmt.Fprintf(w, "data: %s\n\n", sseBytes)
+	// Helper to emit SSE events
+	emit := func(event string, data any) {
+		b, _ := json.Marshal(map[string]any{"type": event, "data": data})
+		fmt.Fprintf(w, "data: %s\n\n", b)
 		flusher.Flush()
-
-		if chunk.Done {
-			break
-		}
 	}
 
+	// Run the Agent Loop
+	_, err := h.Agent.Run(r.Context(), reqBody.SessionID, reqBody.Prompt, reqBody.Model, reqBody.Think, reqBody.ThinkLevel, state, emit)
+	if err != nil {
+		emit("error", map[string]any{"message": err.Error()})
+	}
+
+	// Send final done event to signal client connection close
 	fmt.Fprintf(w, "data: {\"done\": true}\n\n")
 	flusher.Flush()
-
-	// 7. Append assistant response
-	if fullAssistantResponse != "" {
-		assistantMsg := context.Message{
-			Role:      "assistant",
-			Content:   fullAssistantResponse,
-			Timestamp: time.Now(),
-		}
-		context.Store.AppendMessage(reqBody.SessionID, assistantMsg)
-	}
 }
 
 // GetContext handles GET /api/context?session_id=...
@@ -186,10 +142,9 @@ func (h *ChatHandler) GetContext(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Assuming default model for token usage if not provided in query
 	model := r.URL.Query().Get("model")
 	if model == "" {
-		model = "codellama" // Default fallback
+		model = "qwen2.5-coder:1.5b"
 	}
 
 	session := context.Store.GetOrCreate(sessionID)
@@ -218,7 +173,6 @@ func (h *ChatHandler) GetContext(w http.ResponseWriter, r *http.Request) {
 			Summary:      cp.Summary,
 		})
 	}
-
 	if cpResp == nil {
 		cpResp = []CheckpointResp{}
 	}
@@ -238,7 +192,7 @@ func (h *ChatHandler) GetContext(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-// ResetContext handles POST /api/context/reset
+// ResetContext handles POST /api/context/reset.
 func (h *ChatHandler) ResetContext(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)

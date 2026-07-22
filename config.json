@@ -1,15 +1,23 @@
 {
+  "host": "127.0.0.1",
   "port": 8080,
   "ollama_url": "http://localhost:11434",
-  "default_model": "codellama",
+  "db_path": "./data/nativestudio.db",
+  "default_model": "qwen2.5-coder:1.5b",
+  "chat_model": "qwen2.5-coder:1.5b",
+  "summary_model": "qwen2.5-coder:1.5b",
+  "embedding_model": "nomic-embed-text",
+  "index_batch_size": 10,
+  "maximum_file_size_bytes": 1048576,
+  "ollama_concurrency": 2,
   "context": {
     "yellow_threshold": 0.6,
     "red_threshold": 0.8,
     "keep_recent_messages": 10,
-    "summarize_using_model": "llama3"
+    "summarize_using_model": "qwen2.5-coder:1.5b"
   },
   "filesystem": {
     "root_dir": "./workspace",
-    "allowed_extensions": [".php", ".go", ".js", ".ts", ".py", ".md", ".json", ".yaml"]
+    "allowed_extensions": [".php", ".go", ".mod", ".sum", ".js", ".jsx", ".ts", ".tsx", ".py", ".md", ".json", ".yaml", ".yml", ".sql", ".xml", ".toml"]
   }
 }

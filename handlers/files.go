@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	workspacefs "github.com/entreya/nativestudio/workspace"
 )
 
 // FileNode represents a file or directory in the file tree
@@ -23,6 +25,14 @@ type FileHandler struct {
 	mu                sync.RWMutex
 	RootDir           string
 	AllowedExtensions []string
+	onWorkspaceChange func(string, string)
+}
+
+// SetWorkspaceChangeHandler keeps other workspace-scoped services in sync.
+func (h *FileHandler) SetWorkspaceChangeHandler(callback func(string, string)) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.onWorkspaceChange = callback
 }
 
 // NewFileHandler creates a new FileHandler
@@ -37,7 +47,7 @@ func NewFileHandler(rootDir string, allowedExtensions []string) *FileHandler {
 func (h *FileHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/files", h.ListFiles)
 	mux.HandleFunc("/api/file", h.HandleFile)
-	mux.HandleFunc("/api/workspace", h.ChangeWorkspace)
+	mux.HandleFunc("/api/workspace", h.WorkspaceHandler)
 }
 
 func (h *FileHandler) GetRootDir() string {
@@ -92,8 +102,8 @@ func (h *FileHandler) buildTree(currentPath string, root string) (*FileNode, err
 	if relPath == "/." {
 		relPath = "/"
 	}
-    // Normalize path separators for Windows to use forward slashes in API
-    relPath = strings.ReplaceAll(relPath, "\\", "/")
+	// Normalize path separators for Windows to use forward slashes in API
+	relPath = strings.ReplaceAll(relPath, "\\", "/")
 
 	node := &FileNode{
 		Name: info.Name(),
@@ -157,26 +167,9 @@ func (h *FileHandler) HandleFile(w http.ResponseWriter, r *http.Request) {
 
 // isPathAllowed checks if the target path is within the root directory and has an allowed extension
 func (h *FileHandler) isPathAllowed(targetPath string) (string, error) {
-	// Ensure path starts with /
-	if !strings.HasPrefix(targetPath, "/") {
-		targetPath = "/" + targetPath
-	}
-
-	// Clean the target path to prevent traversal (e.g. /../)
-	cleanPath := filepath.Clean(targetPath)
-
-	// Join with absolute root dir
-	absRoot, err := filepath.Abs(h.GetRootDir())
+	fullPath, err := (workspacefs.Guard{Root: h.GetRootDir()}).Resolve(targetPath)
 	if err != nil {
 		return "", err
-	}
-
-	// Join clean path (removing leading slash so Join works properly relative to root)
-	fullPath := filepath.Join(absRoot, strings.TrimPrefix(cleanPath, "/"))
-
-	// Double check it's within root
-	if !strings.HasPrefix(fullPath, absRoot) {
-		return "", fmt.Errorf("path escapes root directory")
 	}
 
 	// Check extension
@@ -266,14 +259,28 @@ func (h *FileHandler) WriteFile(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }
 
-// ChangeWorkspace updates the RootDir
-func (h *FileHandler) ChangeWorkspace(w http.ResponseWriter, r *http.Request) {
+// WorkspaceHandler handles GET and POST for workspace root
+func (h *FileHandler) WorkspaceHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"root_dir": h.GetRootDir()})
+		return
+	}
+
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	// Repointing the workspace root lets any later /api/file call read or write
+	// anywhere under the chosen directory, so this must never be reachable from
+	// the network even if the server is misconfigured to listen non-locally.
+	if !isLoopbackRequest(r) {
+		http.Error(w, "changing the workspace root is only available locally", http.StatusForbidden)
+		return
+	}
 	var req struct {
-		Path string `json:"path"`
+		Path      string `json:"path"`
+		ProjectID string `json:"project_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
@@ -287,6 +294,12 @@ func (h *FileHandler) ChangeWorkspace(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.SetRootDir(req.Path)
+	h.mu.RLock()
+	callback := h.onWorkspaceChange
+	h.mu.RUnlock()
+	if callback != nil {
+		callback(req.ProjectID, req.Path)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }

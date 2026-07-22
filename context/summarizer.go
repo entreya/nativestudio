@@ -88,19 +88,7 @@ Conversation History:
 	}
 
 	summary := strings.TrimSpace(ollamaResp.Response)
-
-	// 5. Build new messages array: [checkpoint, ...recentMessages]
-	checkpointMsg := Message{
-		Role:         "system",
-		IsCheckpoint: true,
-		Content:      summary,
-		Timestamp:    time.Now(),
-	}
-
 	tokensAfter := EstimateTokens(summary)
-
-	newMessages := []Message{checkpointMsg}
-	newMessages = append(newMessages, recentMessages...)
 
 	checkpointMeta := Checkpoint{
 		CreatedAt:    time.Now(),
@@ -109,8 +97,23 @@ Conversation History:
 		Summary:      summary,
 	}
 
-	// 6. Update store
-	Store.UpdateMessagesAndCheckpoints(sessionID, newMessages, checkpointMeta)
+	// Everything at or after keepFromSeq is left untouched, so any message a
+	// concurrent chat turn appends while this summarization is in flight is
+	// never lost — it simply lands after the threshold. See ReplaceWithCheckpoint.
+	var keepFromSeq int
+	switch {
+	case len(recentMessages) > 0:
+		keepFromSeq = recentMessages[0].Sequence
+	case len(oldMessages) > 0:
+		keepFromSeq = oldMessages[len(oldMessages)-1].Sequence + 1
+	default:
+		return nil
+	}
+
+	// 5. Collapse messages before keepFromSeq into a single checkpoint message.
+	if err := Store.ReplaceWithCheckpoint(sessionID, keepFromSeq, checkpointMeta); err != nil {
+		return fmt.Errorf("failed to save checkpoint: %w", err)
+	}
 
 	return nil
 }

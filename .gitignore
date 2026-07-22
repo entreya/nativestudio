@@ -1,0 +1,18 @@
+# Build artifacts
+/main
+/bin/
+*.exe
+
+# Local runtime data — SQLite DB holds full indexed source + chat history
+/data/
+*.db
+*.db-shm
+*.db-wal
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Editor/OS noise
+.DS_Store
+*.swp

@@ -7,13 +7,15 @@ import (
 
 // ModelsHandler handles querying Ollama models
 type ModelsHandler struct {
-	OllamaURL string
+	OllamaURL    string
+	DefaultModel string
 }
 
 // NewModelsHandler creates a new ModelsHandler
-func NewModelsHandler(ollamaURL string) *ModelsHandler {
+func NewModelsHandler(ollamaURL, defaultModel string) *ModelsHandler {
 	return &ModelsHandler{
-		OllamaURL: ollamaURL,
+		OllamaURL:    ollamaURL,
+		DefaultModel: defaultModel,
 	}
 }
 
@@ -34,8 +36,9 @@ func (h *ModelsHandler) GetModels(w http.ResponseWriter, r *http.Request) {
 		// Ollama is unreachable
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"models": []string{},
-			"error":  "ollama not running",
+			"models":        []string{},
+			"default_model": h.DefaultModel,
+			"error":         "ollama not running",
 		})
 		return
 	}
@@ -64,6 +67,7 @@ func (h *ModelsHandler) GetModels(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"models": modelNames,
+		"models":        modelNames,
+		"default_model": h.DefaultModel,
 	})
 }

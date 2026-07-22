@@ -1,8 +1,12 @@
 package context
 
 import (
-	"sync"
+	"crypto/rand"
+	"fmt"
+	"log"
 	"time"
+
+	"github.com/entreya/nativestudio/db"
 )
 
 type Message struct {
@@ -10,6 +14,7 @@ type Message struct {
 	Content      string    `json:"content"`
 	Timestamp    time.Time `json:"timestamp"`
 	IsCheckpoint bool      `json:"is_checkpoint"`
+	Sequence     int       `json:"-"`
 }
 
 type Checkpoint struct {
@@ -29,92 +34,136 @@ type Session struct {
 	UpdatedAt   time.Time    `json:"updated_at"`
 }
 
-type SessionStore struct {
-	mu       sync.RWMutex
-	sessions map[string]*Session
+func newID() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
 }
 
-func NewSessionStore() *SessionStore {
-	return &SessionStore{
-		sessions: make(map[string]*Session),
-	}
+type DBStore struct {
+	database *db.DB
 }
 
-var Store = NewSessionStore()
-
-func (s *SessionStore) GetOrCreate(sessionID string) *Session {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if session, exists := s.sessions[sessionID]; exists {
-		return session
-	}
-
-	session := &Session{
-		ID:          sessionID,
-		Messages:    make([]Message, 0),
-		Checkpoints: make([]Checkpoint, 0),
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
-	}
-	s.sessions[sessionID] = session
-	return session
+func NewDBStore(database *db.DB) *DBStore {
+	return &DBStore{database: database}
 }
 
-func (s *SessionStore) AppendMessage(sessionID string, msg Message) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+var Store *DBStore
 
-	if session, exists := s.sessions[sessionID]; exists {
-		if msg.Timestamp.IsZero() {
-			msg.Timestamp = time.Now()
+func (s *DBStore) GetOrCreate(sessionID string) *Session {
+	// Try to get session from DB
+	dbSess, err := s.database.GetSession(sessionID)
+	if err != nil {
+		// Session might not exist yet if called directly from chat before UI created it,
+		// but with the new UI it should exist. Return a dummy view just in case.
+		return &Session{
+			ID:          sessionID,
+			Messages:    []Message{},
+			Checkpoints: []Checkpoint{},
+			Model:       "qwen2.5-coder:1.5b", // Fallback
 		}
-		session.Messages = append(session.Messages, msg)
-		session.UpdatedAt = time.Now()
+	}
+
+	msgs, _ := s.GetMessagesFromDB(sessionID)
+	chks, _ := s.GetCheckpointsFromDB(sessionID)
+
+	return &Session{
+		ID:          dbSess.ID,
+		Messages:    msgs,
+		Checkpoints: chks,
+		Model:       dbSess.Model,
+		CreatedAt:   dbSess.CreatedAt,
+		UpdatedAt:   dbSess.UpdatedAt,
 	}
 }
 
-func (s *SessionStore) GetMessages(sessionID string) []Message {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	if session, exists := s.sessions[sessionID]; exists {
-		// Return a copy to avoid data races
-		messages := make([]Message, len(session.Messages))
-		copy(messages, session.Messages)
-		return messages
+func (s *DBStore) AppendMessage(sessionID string, msg Message) *db.Message {
+	if msg.Timestamp.IsZero() {
+		msg.Timestamp = time.Now()
 	}
-	return nil
+	est := EstimateMessagesTokens([]Message{msg})
+	saved, err := s.database.AppendMessage(newID(), sessionID, msg.Role, msg.Content, msg.IsCheckpoint, est)
+	if err != nil {
+		log.Printf("Failed to append message to DB: %v", err)
+		return nil
+	}
+	s.database.TouchSession(sessionID)
+	return saved
 }
 
-func (s *SessionStore) GetTokenUsage(sessionID, model string) (used int, total int, pct float64) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+func (s *DBStore) GetMessagesFromDB(sessionID string) ([]Message, error) {
+	dbMsgs, err := s.database.GetMessages(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	var msgs []Message
+	for _, m := range dbMsgs {
+		msgs = append(msgs, Message{
+			Role:         m.Role,
+			Content:      m.Content,
+			Timestamp:    m.CreatedAt,
+			IsCheckpoint: m.IsCheckpoint,
+			Sequence:     m.Sequence,
+		})
+	}
+	return msgs, nil
+}
 
+func (s *DBStore) GetCheckpointsFromDB(sessionID string) ([]Checkpoint, error) {
+	dbChks, err := s.database.GetCheckpoints(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	var chks []Checkpoint
+	for _, c := range dbChks {
+		chks = append(chks, Checkpoint{
+			CreatedAt:    c.CreatedAt,
+			TokensBefore: c.TokensBefore,
+			TokensAfter:  c.TokensAfter,
+			Summary:      c.Summary,
+		})
+	}
+	return chks, nil
+}
+
+func (s *DBStore) GetMessages(sessionID string) []Message {
+	msgs, err := s.GetMessagesFromDB(sessionID)
+	if err != nil {
+		log.Printf("Failed to get messages: %v", err)
+		return []Message{}
+	}
+	return msgs
+}
+
+func (s *DBStore) GetTokenUsage(sessionID, model string) (used int, total int, pct float64) {
 	total = GetModelContextWindow(model)
 
-	if session, exists := s.sessions[sessionID]; exists {
-		used = EstimateMessagesTokens(session.Messages)
+	msgs := s.GetMessages(sessionID)
+	used = EstimateMessagesTokens(msgs)
+	if total > 0 {
 		pct = float64(used) / float64(total)
-		return used, total, pct
 	}
-
-	return 0, total, 0.0
+	return used, total, pct
 }
 
-func (s *SessionStore) Reset(sessionID string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.sessions, sessionID)
+func (s *DBStore) Reset(sessionID string) {
+	err := s.database.DeleteMessages(sessionID)
+	if err != nil {
+		log.Printf("Failed to reset session: %v", err)
+	}
+	s.database.TouchSession(sessionID)
 }
 
-func (s *SessionStore) UpdateMessagesAndCheckpoints(sessionID string, messages []Message, checkpoint Checkpoint) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	
-	if session, exists := s.sessions[sessionID]; exists {
-		session.Messages = messages
-		session.Checkpoints = append(session.Checkpoints, checkpoint)
-		session.UpdatedAt = time.Now()
+// ReplaceWithCheckpoint collapses every message with sequence < keepFromSeq
+// into a single checkpoint message, keeping everything from keepFromSeq
+// onward untouched. Using a sequence threshold (rather than wiping and
+// re-inserting the whole table) means a chat turn that appends new messages
+// concurrently with this call can never have those messages deleted — they
+// all land at sequence >= keepFromSeq and are simply left alone.
+func (s *DBStore) ReplaceWithCheckpoint(sessionID string, keepFromSeq int, checkpoint Checkpoint) error {
+	if err := s.database.ReplaceMessagesWithCheckpoint(sessionID, newID(), newID(), keepFromSeq, checkpoint.Summary, checkpoint.TokensBefore, checkpoint.TokensAfter); err != nil {
+		return err
 	}
+	s.database.TouchSession(sessionID)
+	return nil
 }

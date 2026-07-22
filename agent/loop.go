@@ -1,0 +1,478 @@
+package agent
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/entreya/nativestudio/db"
+	"github.com/entreya/nativestudio/editor"
+)
+
+// OllamaMessage represents a single message in the Ollama conversation format.
+type OllamaMessage struct {
+	Role       string           `json:"role"`
+	Content    string           `json:"content"`
+	Thinking   string           `json:"thinking,omitempty"`
+	ToolCalls  []OllamaToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string           `json:"tool_call_id,omitempty"`
+}
+
+// OllamaToolCall represents a tool call requested by the model.
+type OllamaToolCall struct {
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string        `json:"name"`
+		Arguments ToolArguments `json:"arguments"`
+	} `json:"function"`
+}
+
+// ToolArguments accepts both Ollama's current object form and the older
+// JSON-encoded string form used by some local model templates.
+type ToolArguments string
+
+func (a *ToolArguments) UnmarshalJSON(data []byte) error {
+	if len(data) > 0 && data[0] == '"' {
+		var encoded string
+		if err := json.Unmarshal(data, &encoded); err != nil {
+			return err
+		}
+		*a = ToolArguments(encoded)
+		return nil
+	}
+	*a = ToolArguments(data)
+	return nil
+}
+
+func (a ToolArguments) MarshalJSON() ([]byte, error) {
+	if a == "" {
+		return []byte(`{}`), nil
+	}
+	if !json.Valid([]byte(a)) {
+		return json.Marshal(string(a))
+	}
+	return []byte(a), nil
+}
+
+// AgentRun tracks the state of a single agent execution loop.
+type AgentRun struct {
+	RunID      string
+	SessionID  string
+	Model      string
+	Steps      int
+	MaxSteps   int
+	Think      bool
+	ThinkLevel string
+	// Direct disables tools and agent-planning events for lightweight conversation.
+	Direct bool
+	// State holds the editor context for the get_editor_context tool.
+	State editor.EditorState
+	DB    *db.DB
+}
+
+// DefaultMaxSteps is the maximum number of tool-call iterations before the agent stops.
+const DefaultMaxSteps = 15
+
+// Step executes one iteration of the agent loop:
+// 1. Sends messages to Ollama with tool definitions
+// 2. Streams the response
+// 3. If the model calls tools, executes them and returns done=false
+// 4. If the model produces a final text response, returns done=true
+func (run *AgentRun) Step(
+	ctx context.Context,
+	messages []OllamaMessage,
+	registry *Registry,
+	ollamaURL string,
+	emit func(string, any),
+) (bool, []OllamaMessage, error) {
+
+	if run.Steps >= run.MaxSteps {
+		emit("error", map[string]any{"message": "max_steps_reached"})
+		return true, messages, nil
+	}
+	if !run.Direct {
+		emit("agent_step", map[string]any{"step": run.Steps + 1, "message": "Planning the next action"})
+	}
+
+	// Bound the Ollama round trip so a wedged model/server can't hold the SSE
+	// connection open forever. Generous, since local generation on modest
+	// hardware with a long context can legitimately take minutes.
+	stepCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+
+	// Build Ollama request
+	ollamaReq := map[string]any{
+		"model":    run.Model,
+		"messages": messages,
+		"stream":   true,
+	}
+	if !run.Direct {
+		ollamaReq["tools"] = registry.OllamaDefinitions()
+	}
+	if run.Think && supportsNativeThinking(run.Model) {
+		level := normalizeThinkLevel(run.ThinkLevel)
+		if strings.HasPrefix(strings.ToLower(run.Model), "gpt-oss") {
+			ollamaReq["think"] = level
+		} else {
+			ollamaReq["think"] = true
+		}
+	}
+
+	// Call Ollama /api/chat. Older Ollama builds and some model templates reject
+	// the think field with HTTP 400; retry once without it instead of failing the
+	// whole conversation.
+	doRequest := func(payload map[string]any) (*http.Response, error) {
+		reqBytes, err := json.Marshal(payload)
+		if err != nil {
+			return nil, fmt.Errorf("marshal request: %w", err)
+		}
+		httpReq, err := http.NewRequestWithContext(stepCtx, http.MethodPost, ollamaURL+"/api/chat", bytes.NewReader(reqBytes))
+		if err != nil {
+			return nil, fmt.Errorf("build request: %w", err)
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		return http.DefaultClient.Do(httpReq)
+	}
+
+	resp, err := doRequest(ollamaReq)
+	if err != nil {
+		return true, messages, fmt.Errorf("ollama unreachable: %w", err)
+	}
+	if resp.StatusCode == http.StatusBadRequest && ollamaReq["think"] != nil {
+		resp.Body.Close()
+		delete(ollamaReq, "think")
+		emit("thinking_unavailable", map[string]any{"message": "This model does not support native thinking; continuing without a reasoning trace."})
+		resp, err = doRequest(ollamaReq)
+		if err != nil {
+			return true, messages, fmt.Errorf("ollama unreachable: %w", err)
+		}
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return true, messages, fmt.Errorf("ollama returned status %d", resp.StatusCode)
+	}
+
+	// Stream and accumulate the response
+	var thinkingBuf strings.Builder
+	var contentBuf strings.Builder
+	var toolCalls []OllamaToolCall
+
+	scanner := bufio.NewScanner(resp.Body)
+	// Increase buffer size for large responses
+	scanner.Buffer(make([]byte, 0, 256*1024), 1024*1024)
+
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+
+		var chunk struct {
+			Message struct {
+				Content   string           `json:"content"`
+				Thinking  string           `json:"thinking"`
+				ToolCalls []OllamaToolCall `json:"tool_calls"`
+			} `json:"message"`
+			Done            bool `json:"done"`
+			PromptEvalCount int  `json:"prompt_eval_count"`
+			EvalCount       int  `json:"eval_count"`
+		}
+
+		if err := json.Unmarshal(line, &chunk); err != nil {
+			continue
+		}
+
+		// Accumulate thinking tokens
+		if chunk.Message.Thinking != "" {
+			thinkingBuf.WriteString(chunk.Message.Thinking)
+			emit("thinking_token", map[string]any{"text": chunk.Message.Thinking})
+		}
+
+		// Accumulate content tokens — stream them to the client in real time
+		if chunk.Message.Content != "" {
+			contentBuf.WriteString(chunk.Message.Content)
+			emit("token", map[string]any{"text": chunk.Message.Content})
+		}
+
+		// Collect tool calls
+		if len(chunk.Message.ToolCalls) > 0 {
+			toolCalls = append(toolCalls, chunk.Message.ToolCalls...)
+		}
+
+		if chunk.Done {
+			emit("usage", map[string]any{
+				"prompt_tokens":     chunk.PromptEvalCount,
+				"completion_tokens": chunk.EvalCount,
+				"total_tokens":      chunk.PromptEvalCount + chunk.EvalCount,
+			})
+			break
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return true, messages, fmt.Errorf("read ollama stream: %w", err)
+	}
+
+	// Some local models print a function call as JSON instead of using Ollama's
+	// tool_calls field. Recognize only exact calls to registered tools, then
+	// clear that protocol JSON from the UI and process it as a real tool call.
+	if !run.Direct && len(toolCalls) == 0 {
+		if parsedCalls := parseTextToolCalls(contentBuf.String(), registry); len(parsedCalls) > 0 {
+			toolCalls = parsedCalls
+			contentBuf.Reset()
+			emit("replace_content", map[string]any{"text": ""})
+		}
+	}
+
+	// Tool-challenged local models sometimes narrate the instruction "Ask the
+	// user ..." instead of calling ask_follow_up. Convert that protocol leak
+	// into the same structured clarification UI.
+	if !run.Direct && len(toolCalls) == 0 {
+		if followUp, ok := parseNarratedFollowUp(contentBuf.String()); ok {
+			contentBuf.Reset()
+			emit("replace_content", map[string]any{"text": ""})
+			emit("follow_up", followUp)
+			messages = append(messages, OllamaMessage{Role: "assistant", Content: followUp["question"].(string)})
+			return true, messages, nil
+		}
+	}
+
+	// Case 1: No tool calls → final response, done
+	if len(toolCalls) == 0 {
+		assistantMsg := OllamaMessage{
+			Role:     "assistant",
+			Content:  contentBuf.String(),
+			Thinking: thinkingBuf.String(),
+		}
+		messages = append(messages, assistantMsg)
+		return true, messages, nil
+	}
+
+	// Case 2: Tool calls → execute them, not done yet
+	assistantMsg := OllamaMessage{
+		Role:      "assistant",
+		Content:   contentBuf.String(),
+		Thinking:  thinkingBuf.String(),
+		ToolCalls: toolCalls,
+	}
+	messages = append(messages, assistantMsg)
+
+	for i, tc := range toolCalls {
+		callID := tc.ID
+		if callID == "" {
+			callID = fmt.Sprintf("call_%d_%d", run.Steps, i)
+		}
+
+		// Parse arguments
+		var args ToolInput
+		if tc.Function.Arguments != "" {
+			if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+				args = ToolInput{}
+			}
+		} else {
+			args = ToolInput{}
+		}
+
+		// Clarification is a pause in the agent run, not an executable action.
+		// The next user response resumes naturally as a new chat turn.
+		if tc.Function.Name == "ask_follow_up" {
+			question, _ := args["question"].(string)
+			if strings.TrimSpace(question) == "" {
+				question = "Could you clarify what you would like me to do?"
+			}
+			options := stringSlice(args["options"])
+			inputType, _ := args["input_type"].(string)
+			if inputType != "text" && inputType != "select" && inputType != "multiselect" {
+				if len(options) > 0 {
+					inputType = "select"
+				} else {
+					inputType = "text"
+				}
+			}
+			emit("replace_content", map[string]any{"text": ""})
+			emit("follow_up", map[string]any{"question": question, "options": options, "input_type": inputType})
+
+			clarification := question
+			if len(options) > 0 {
+				clarification += "\nOptions: " + strings.Join(options, "; ")
+			}
+			messages = append(messages, OllamaMessage{Role: "assistant", Content: clarification})
+			return true, messages, nil
+		}
+
+		emit("tool_call", map[string]any{
+			"id":    callID,
+			"name":  tc.Function.Name,
+			"input": args,
+		})
+
+		// Look up and execute the tool
+		tool, found := registry.Get(tc.Function.Name)
+		var result ToolResult
+		if !found {
+			result = ToolResult{OK: false, Error: fmt.Sprintf("unknown tool: %s", tc.Function.Name)}
+		} else {
+			var execErr error
+			meta := ToolMeta{SessionID: run.SessionID, RunID: run.RunID, WorkspaceRoot: registry.WorkspaceRoot(), DB: run.DB}
+			result, execErr = tool.Execute(ctx, args, meta)
+			if execErr != nil {
+				result = ToolResult{OK: false, Error: execErr.Error()}
+			}
+		}
+
+		if found && tool.Safety >= RequiresApproval && result.OK {
+			if output, ok := result.Content.(map[string]any); ok {
+				staged, _ := output["staged"].(bool)
+				if staged {
+					emit("patch_staged", map[string]any{
+						"patch_id": output["patch_id"], "file_path": output["file_path"],
+						"operation": output["operation"], "diff": output["diff"],
+					})
+				}
+			}
+		}
+
+		emit("tool_result", map[string]any{
+			"id":     callID,
+			"name":   tc.Function.Name,
+			"output": result.Content,
+			"ok":     result.OK,
+			"error":  result.Error,
+		})
+
+		// Build the tool result message for the conversation
+		resultBytes, _ := json.Marshal(result)
+		toolMsg := OllamaMessage{
+			Role:       "tool",
+			Content:    string(resultBytes),
+			ToolCallID: callID,
+		}
+		messages = append(messages, toolMsg)
+	}
+
+	run.Steps++
+	return false, messages, nil
+}
+
+func normalizeThinkLevel(level string) string {
+	switch strings.ToLower(level) {
+	case "light", "low":
+		return "low"
+	case "medium":
+		return "medium"
+	case "high", "extra", "supreme":
+		return "high"
+	default:
+		return "medium"
+	}
+}
+
+func supportsNativeThinking(model string) bool {
+	base := strings.SplitN(strings.ToLower(model), ":", 2)[0]
+	return strings.HasPrefix(base, "qwen3") ||
+		strings.HasPrefix(base, "deepseek-r1") ||
+		strings.HasPrefix(base, "deepseek-v3.1") ||
+		strings.HasPrefix(base, "gpt-oss")
+}
+
+func parseNarratedFollowUp(content string) (map[string]any, bool) {
+	trimmed := strings.TrimSpace(content)
+	lower := strings.ToLower(trimmed)
+	if !strings.HasPrefix(lower, "ask the user") {
+		return nil, false
+	}
+	question := strings.TrimSpace(trimmed[len("Ask the user"):])
+	question = strings.TrimLeft(question, ":, ")
+	if question == "" {
+		question = "What would you like me to do next?"
+	}
+	options := []string{}
+	inputType := "text"
+	questionLower := strings.ToLower(question)
+	if strings.Contains(questionLower, "whether") || strings.Contains(questionLower, "confirm") || strings.Contains(questionLower, "okay with") {
+		options = []string{"Yes", "No"}
+		inputType = "select"
+	}
+	return map[string]any{"question": question, "options": options, "input_type": inputType}, true
+}
+
+// parseTextToolCalls supports models that emit the tool protocol in the text
+// channel. Ordinary JSON remains untouched unless its name matches a real tool.
+func parseTextToolCalls(content string, registry *Registry) []OllamaToolCall {
+	raw := strings.TrimSpace(content)
+	if strings.HasPrefix(raw, "```json") && strings.HasSuffix(raw, "```") {
+		raw = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(raw, "```json"), "```"))
+	}
+
+	type textFunction struct {
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments"`
+	}
+	type textCall struct {
+		ID        string          `json:"id"`
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments"`
+		Function  textFunction    `json:"function"`
+	}
+	var envelope struct {
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments"`
+		ToolCalls []textCall      `json:"tool_calls"`
+	}
+	if err := json.Unmarshal([]byte(raw), &envelope); err != nil {
+		return nil
+	}
+
+	calls := envelope.ToolCalls
+	if envelope.Name != "" {
+		calls = append(calls, textCall{Name: envelope.Name, Arguments: envelope.Arguments})
+	}
+
+	result := make([]OllamaToolCall, 0, len(calls))
+	for _, call := range calls {
+		name := call.Function.Name
+		arguments := call.Function.Arguments
+		if name == "" {
+			name = call.Name
+			arguments = call.Arguments
+		}
+		if _, ok := registry.Get(name); !ok {
+			return nil
+		}
+		if len(arguments) == 0 || string(arguments) == "null" {
+			arguments = json.RawMessage(`{}`)
+		}
+		// Arguments may themselves be a JSON-encoded string.
+		var encoded string
+		if json.Unmarshal(arguments, &encoded) == nil {
+			arguments = json.RawMessage(encoded)
+		}
+		var tc OllamaToolCall
+		tc.ID = call.ID
+		tc.Type = "function"
+		tc.Function.Name = name
+		tc.Function.Arguments = ToolArguments(arguments)
+		result = append(result, tc)
+	}
+	return result
+}
+
+func stringSlice(value any) []string {
+	raw, ok := value.([]any)
+	if !ok {
+		return nil
+	}
+	result := make([]string, 0, len(raw))
+	for _, item := range raw {
+		if text, ok := item.(string); ok && strings.TrimSpace(text) != "" {
+			result = append(result, text)
+		}
+	}
+	return result
+}
