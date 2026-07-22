@@ -80,6 +80,11 @@ func (h *ChatHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		state = *reqBody.EditorContext
 	}
 
+	// Look up the model's real context window (cached after the first call per
+	// model) instead of guessing from its name — matters most for custom or
+	// fine-tuned models the name-prefix heuristic doesn't recognize.
+	context.RefreshModelContextWindow(h.OllamaURL, reqBody.Model)
+
 	// Check token usage
 	_, _, pct := context.Store.GetTokenUsage(reqBody.SessionID, reqBody.Model)
 	if context.ShouldBlock(pct, h.ContextCfg) {
@@ -146,6 +151,7 @@ func (h *ChatHandler) GetContext(w http.ResponseWriter, r *http.Request) {
 	if model == "" {
 		model = "qwen2.5-coder:1.5b"
 	}
+	context.RefreshModelContextWindow(h.OllamaURL, model)
 
 	session := context.Store.GetOrCreate(sessionID)
 	used, total, pct := context.Store.GetTokenUsage(sessionID, model)

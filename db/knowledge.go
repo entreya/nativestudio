@@ -719,6 +719,35 @@ func ftsKnowledgeQuery(terms []string) string {
 	return strings.Join(clauses, " OR ")
 }
 
+// pathTermScore rates how specifically a query term matches a file path.
+// A generic word like "file" or "error" is a substring of countless unrelated
+// paths in any real project ("fileUpload", "file_import", "errorDiv") — full
+// credit for that would let a couple of common English words in a prompt
+// outscore (and crowd out of the token budget) the file the user is actually
+// looking at. An exact match against a path segment or the filename without
+// its extension is a real signal and gets full credit; a bare substring hit
+// is kept (so it can still surface as a last resort) but heavily discounted.
+func pathTermScore(path, term string) float64 {
+	lower := strings.ToLower(path)
+	if !strings.Contains(lower, term) {
+		return 0
+	}
+	base := strings.ToLower(filepath.Base(lower))
+	baseNoExt := strings.TrimSuffix(base, filepath.Ext(base))
+	if baseNoExt == term {
+		return 1
+	}
+	segments := strings.FieldsFunc(lower, func(r rune) bool {
+		return r == '/' || r == '\\' || r == '_' || r == '-' || r == '.'
+	})
+	for _, segment := range segments {
+		if segment == term {
+			return 1
+		}
+	}
+	return 0.2
+}
+
 func scoreSymbolCandidate(path, name, summary, signature, source string, start, end int, terms []string) (knowledge.Candidate, bool) {
 	hay := strings.ToLower(path + " " + name + " " + summary + " " + signature)
 	score := 0.0
@@ -731,8 +760,8 @@ func scoreSymbolCandidate(path, name, summary, signature, source string, start, 
 			score += 18
 			reasons = append(reasons, "symbol_keyword_match")
 		}
-		if strings.Contains(strings.ToLower(path), term) {
-			score += 25
+		if m := pathTermScore(path, term); m > 0 {
+			score += 25 * m
 			reasons = append(reasons, "filename_match")
 		}
 	}
@@ -793,11 +822,10 @@ func (d *DB) searchStructuralKnowledgeFTS(ctx context.Context, workspaceID strin
 		if err := rows.Scan(&candidate.Path, &candidate.StartLine, &candidate.EndLine, &candidate.Content); err != nil {
 			return nil, err
 		}
-		lowerPath := strings.ToLower(candidate.Path)
 		lowerContent := strings.ToLower(candidate.Content)
 		for _, term := range terms {
-			if strings.Contains(lowerPath, term) {
-				candidate.Score += 35
+			if m := pathTermScore(candidate.Path, term); m > 0 {
+				candidate.Score += 35 * m
 				candidate.Reasons = append(candidate.Reasons, "filename_match")
 			}
 			if strings.Contains(lowerContent, term) {
@@ -970,8 +998,8 @@ func (d *DB) SearchKnowledge(ctx context.Context, workspaceID, query string, lim
 		score := 0.0
 		var reasons []string
 		for _, term := range terms {
-			if strings.Contains(strings.ToLower(path), term) {
-				score += 55
+			if m := pathTermScore(path, term); m > 0 {
+				score += 55 * m
 				reasons = append(reasons, "filename_match")
 			}
 			if strings.Contains(hay, term) {
