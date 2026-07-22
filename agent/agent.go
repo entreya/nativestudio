@@ -22,7 +22,7 @@ import (
 
 const assistantSystemPrompt = `You are the coding assistant inside NativeStudio.
 Answer the user in clear natural language, not as JSON. Use the provided tools through native tool calls; never print a tool-call JSON object in the answer.
-Use the active file and editor context when relevant. CRITICAL: Never write code blocks in the chat response. To edit a file, use replace_in_file or apply_patch. To create a file, use create_file. To remove a file, use delete_file. File mutations are staged for the user to approve or reject. Your text response should only explain briefly what you changed and why. If the request is materially ambiguous and choosing incorrectly could change the result, call ask_follow_up directly with one concise question, the appropriate input type, and useful short options. Use multiselect when several answers can apply. Never narrate an instruction such as "Ask the user". If a request depends on unfamiliar or current facts, call search_internet before answering instead of guessing.`
+Use the active file and editor context when relevant. When the user's request is short or does not name a target (e.g. "explain", "fix this", "refactor", "what does this do"), assume they mean the active file open in the editor and answer about that file — do not ask them to paste code you already have access to; use read_file if you need more of it than is already shown. CRITICAL: Never write code blocks in the chat response. To edit a file, use replace_in_file or apply_patch. To create a file, use create_file. To remove a file, use delete_file. File mutations are staged for the user to approve or reject. Your text response should only explain briefly what you changed and why. If the request is materially ambiguous and choosing incorrectly could change the result, call ask_follow_up directly with one concise question, the appropriate input type, and useful short options. Use multiselect when several answers can apply. Never narrate an instruction such as "Ask the user". If a request depends on unfamiliar or current facts, call search_internet before answering instead of guessing.`
 
 // Agent orchestrates a multi-step agent run with tool calling.
 type Agent struct {
@@ -220,10 +220,20 @@ func (a *Agent) Run(
 	}
 	messages = append(messages, OllamaMessage{Role: "system", Content: systemContent})
 
+	// Small local models answer a bare "explain" or "fix this" literally
+	// instead of inferring "the file I have open" the way a larger model
+	// would. Anchor the current turn to the active file by name so the model
+	// has an explicit target — this only changes what's sent to Ollama, never
+	// what's stored in the session or shown in the chat UI.
+	anchoredPrompt := anchorPromptToActiveFile(prompt, contextState)
 	for _, m := range modelContext.History {
+		content := m.Content
+		if m.Role == "user" && content == prompt {
+			content = anchoredPrompt
+		}
 		messages = append(messages, OllamaMessage{
 			Role:    m.Role,
-			Content: m.Content,
+			Content: content,
 		})
 	}
 	// Some small local-model templates pay disproportionate attention to the
@@ -339,6 +349,37 @@ var lightweightConversationPattern = regexp.MustCompile(`(?i)^\s*(hi+|hello+|hey
 
 func isLightweightConversation(prompt string) bool {
 	return lightweightConversationPattern.MatchString(prompt)
+}
+
+// ambiguousPromptPattern matches short imperative requests that omit their
+// object ("explain", "fix this", "refactor", "what does this do", "review").
+// Larger models infer these mean "the file I have open"; smaller local
+// models tend to answer the verb literally instead.
+var ambiguousPromptPattern = regexp.MustCompile(`(?i)^\s*(explain|fix|refactor|review|optimi[sz]e|simplify|document|comment|clean\s*up|improve|rewrite|format|lint|debug|summarize|test)\b`)
+
+// anchorPromptToActiveFile rewrites a short, target-less prompt to explicitly
+// name the active file, so the model has something concrete to act on
+// instead of guessing from a bare verb. Only used for the copy of the prompt
+// sent to the model — the stored/displayed message is untouched.
+func anchorPromptToActiveFile(prompt string, state editor.EditorState) string {
+	trimmed := strings.TrimSpace(prompt)
+	if state.ActiveFile == "" || trimmed == "" {
+		return prompt
+	}
+	if len(strings.Fields(trimmed)) > 6 {
+		return prompt
+	}
+	if !ambiguousPromptPattern.MatchString(trimmed) {
+		return prompt
+	}
+	base := state.ActiveFile
+	if idx := strings.LastIndex(base, "/"); idx >= 0 {
+		base = base[idx+1:]
+	}
+	if base != "" && strings.Contains(strings.ToLower(trimmed), strings.ToLower(base)) {
+		return prompt // already names the file
+	}
+	return fmt.Sprintf("%s `%s` (the file I currently have open).", trimmed, state.ActiveFile)
 }
 
 func (a *Agent) generateConversationMetadata(ctx context.Context, model, currentTitle, currentSummary, userPrompt, assistantResponse string) (string, string, error) {
