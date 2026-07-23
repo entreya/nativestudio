@@ -27,6 +27,36 @@ import CommandReview from './CommandReview';
 const { Text } = Typography;
 const { TextArea } = Input;
 
+// Small local models sometimes disobey the "never print a tool-call JSON
+// object" instruction and narrate the call (or its result) as a fenced code
+// block instead of actually invoking the tool. That JSON is pure noise —
+// the real, correctly-executed call already has its own row in the timeline
+// above — so it's dropped rather than rendered as if it were code the user
+// asked for.
+function isLeakedToolJSON(value) {
+  let parsed;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    return false;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
+  const looksLikeCall = typeof parsed.name === 'string' && parsed.arguments && typeof parsed.arguments === 'object';
+  const looksLikeResult = typeof parsed.ok === 'boolean' && ('staged' in parsed || 'patch_id' in parsed || 'run_id' in parsed || 'operation' in parsed);
+  return looksLikeCall || looksLikeResult;
+}
+
+// The model sometimes writes the leaked JSON bare — not even fenced — as its
+// own line of "prose". Strip any standalone line that's a complete JSON
+// object matching the leaked-call/result shape, leaving the rest of the
+// surrounding text intact.
+function stripLeakedInlineJSON(text) {
+  return text
+    .split('\n')
+    .filter(line => !isLeakedToolJSON(line.trim()))
+    .join('\n');
+}
+
 function MessageContent({ content }) {
   const parts = [];
   const pattern = /```([\w-]*)\r?\n([\s\S]*?)```/g;
@@ -39,9 +69,11 @@ function MessageContent({ content }) {
   }
   if (cursor < (content || '').length) parts.push({ type: 'text', value: content.slice(cursor) });
 
-  return parts.map((part, index) => part.type === 'code'
-    ? <CodeSnippet key={index} language={part.language} code={part.value} />
-    : <div key={index} style={{ whiteSpace: 'pre-wrap' }}>{part.value}</div>);
+  return parts.map((part, index) => {
+    if (part.type !== 'code') return <div key={index} style={{ whiteSpace: 'pre-wrap' }}>{stripLeakedInlineJSON(part.value)}</div>;
+    if (isLeakedToolJSON(part.value.trim())) return null;
+    return <CodeSnippet key={index} language={part.language} code={part.value} />;
+  });
 }
 
 function sameWorkspacePath(left, right) {
