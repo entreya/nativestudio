@@ -212,13 +212,17 @@ button, input, textarea { font: inherit; }
 .theme-shell .ant-tabs-tab-btn,
 .theme-shell .ant-tree-title { font-family: var(--studio-font); }
 .theme-shell .ant-typography-secondary { color: var(--studio-muted) !important; }
-/* File explorer rows must stay single-line — long names are ellipsized
-   rather than wrapping onto a second line. Both the tree's own row and its
-   flex-content wrapper need min-width:0/overflow:hidden for the ellipsis on
-   .ant-tree-title (and FileTree's custom titleRender span inside it) to work. */
-.theme-shell .ant-tree .ant-tree-treenode { max-width: 100%; }
-.theme-shell .ant-tree .ant-tree-node-content-wrapper { overflow: hidden; min-width: 0; flex: 1 1 auto; }
-.theme-shell .ant-tree-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
+/* File tree rows must stay single-line — long names are ellipsized rather
+   than wrapping onto a second line. Deliberately NOT scoped to .theme-shell:
+   antd Modals (e.g. the "Open Folder" picker) render their content into a
+   portal attached to document.body, outside that ancestor entirely, so a
+   .theme-shell-prefixed rule would silently never match there. Both the
+   tree's own row and its flex-content wrapper need min-width:0/overflow:hidden
+   for the ellipsis on .ant-tree-title (and FileTree's custom titleRender span
+   inside it) to work. */
+.ant-tree .ant-tree-treenode { max-width: 100%; }
+.ant-tree .ant-tree-node-content-wrapper { overflow: hidden; min-width: 0; flex: 1 1 auto; }
+.ant-tree-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
 .theme-shell .ant-tabs-tab-active { background: var(--studio-panel) !important; }
 .theme-shell .layout-switcher { border-color: var(--studio-border); background: var(--studio-panel); }
 .theme-shell .layout-switcher .is-visible { color: var(--studio-accent); background: var(--studio-accent-soft); }
