@@ -216,13 +216,15 @@ button, input, textarea { font: inherit; }
    than wrapping onto a second line. Deliberately NOT scoped to .theme-shell:
    antd Modals (e.g. the "Open Folder" picker) render their content into a
    portal attached to document.body, outside that ancestor entirely, so a
-   .theme-shell-prefixed rule would silently never match there. Both the
-   tree's own row and its flex-content wrapper need min-width:0/overflow:hidden
-   for the ellipsis on .ant-tree-title (and FileTree's custom titleRender span
-   inside it) to work. */
+   .theme-shell-prefixed rule would silently never match there. The wrapper
+   must be an explicit flex row (icon + title side by side) — without it,
+   giving .ant-tree-title `display:block` below makes it a block-level child
+   with no sibling flex context, so it drops to its own line under the icon
+   instead of sitting next to it. min-width:0/overflow:hidden on the wrapper
+   is what lets the title's ellipsis actually take effect within that row. */
 .ant-tree .ant-tree-treenode { max-width: 100%; }
-.ant-tree .ant-tree-node-content-wrapper { overflow: hidden; min-width: 0; flex: 1 1 auto; }
-.ant-tree-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
+.ant-tree .ant-tree-node-content-wrapper { display: flex; align-items: center; overflow: hidden; min-width: 0; flex: 1 1 auto; }
+.ant-tree-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; min-width: 0; flex: 1 1 auto; }
 .theme-shell .ant-tabs-tab-active { background: var(--studio-panel) !important; }
 .theme-shell .layout-switcher { border-color: var(--studio-border); background: var(--studio-panel); }
 .theme-shell .layout-switcher .is-visible { color: var(--studio-accent); background: var(--studio-accent-soft); }
