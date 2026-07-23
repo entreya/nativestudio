@@ -10,6 +10,7 @@
   "index_batch_size": 10,
   "maximum_file_size_bytes": 1048576,
   "ollama_concurrency": 2,
+  "max_agent_tool_steps": 15,
   "context": {
     "yellow_threshold": 0.6,
     "red_threshold": 0.8,

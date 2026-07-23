@@ -6,18 +6,30 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
 	workspacefs "github.com/entreya/nativestudio/workspace"
 )
 
-// FileNode represents a file or directory in the file tree
-type FileNode struct {
-	Name     string      `json:"name"`
-	Path     string      `json:"path"`
-	Type     string      `json:"type"` // "file" or "dir"
-	Children []*FileNode `json:"children,omitempty"`
+// FileEntry represents one immediate child of a directory listed by
+// GET /api/files.
+type FileEntry struct {
+	Name        string `json:"name"`
+	Path        string `json:"path"`
+	Type        string `json:"type"` // "file" or "dir"
+	HasChildren bool   `json:"has_children,omitempty"`
+}
+
+// excludedTreeDirectories are never listed, so common dependency and
+// build-output directories don't blow up the tree for large projects — they
+// can easily contain tens of thousands of files that happen to match an
+// allowed extension (e.g. .php inside vendor/, .js inside node_modules/).
+var excludedTreeDirectories = map[string]bool{
+	".git": true, "node_modules": true, "vendor": true, "dist": true, "build": true,
+	"coverage": true, "target": true, "tmp": true, "cache": true, ".cache": true,
+	".next": true, ".nuxt": true, "__pycache__": true,
 }
 
 // FileHandler manages filesystem endpoints
@@ -48,6 +60,9 @@ func (h *FileHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/files", h.ListFiles)
 	mux.HandleFunc("/api/file", h.HandleFile)
 	mux.HandleFunc("/api/workspace", h.WorkspaceHandler)
+	mux.HandleFunc("POST /api/files/create", h.CreateEntry)
+	mux.HandleFunc("POST /api/files/rename", h.RenameEntry)
+	mux.HandleFunc("POST /api/files/delete", h.DeleteEntry)
 }
 
 func (h *FileHandler) GetRootDir() string {
@@ -62,7 +77,14 @@ func (h *FileHandler) SetRootDir(path string) {
 	h.RootDir = path
 }
 
-// ListFiles walks the RootDir and returns a JSON tree
+// ListFiles handles GET /api/files?path=... and returns the immediate
+// children of the given directory (the workspace root if path is omitted),
+// one level at a time. The frontend fetches deeper levels lazily as the user
+// expands them — returning the whole tree recursively in one response was
+// what made opening a large project hang the browser, since it eagerly
+// walked and shipped every file under the workspace (including inside
+// node_modules/vendor/etc, which weren't even excluded) before anything
+// could render.
 func (h *FileHandler) ListFiles(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -70,87 +92,103 @@ func (h *FileHandler) ListFiles(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rootDir := h.GetRootDir()
-	tree, err := h.buildTree(rootDir, rootDir)
+	full, err := (workspacefs.Guard{Root: rootDir}).Resolve(r.URL.Query().Get("path"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	info, err := os.Stat(full)
+	if err != nil || !info.IsDir() {
+		http.Error(w, "not a directory", http.StatusBadRequest)
+		return
+	}
+
+	entries, err := h.listDirectory(full, rootDir)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// Return an empty array if tree has no children
-	if tree == nil || tree.Children == nil {
-		tree = &FileNode{Children: []*FileNode{}}
-	}
-
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(tree.Children)
+	json.NewEncoder(w).Encode(entries)
 }
 
-// buildTree recursively builds the file tree
-func (h *FileHandler) buildTree(currentPath string, root string) (*FileNode, error) {
-	info, err := os.Stat(currentPath)
+// listDirectory returns the visible, allowed immediate children of dir,
+// directories first then alphabetically.
+func (h *FileHandler) listDirectory(dir, root string) ([]FileEntry, error) {
+	rawEntries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}
-
-	relPath, err := filepath.Rel(root, currentPath)
-	if err != nil {
-		return nil, err
-	}
-
-	// Prepend slash to represent absolute path from root
-	relPath = "/" + relPath
-	if relPath == "/." {
-		relPath = "/"
-	}
-	// Normalize path separators for Windows to use forward slashes in API
-	relPath = strings.ReplaceAll(relPath, "\\", "/")
-
-	node := &FileNode{
-		Name: info.Name(),
-		Path: relPath,
-		Type: "file",
-	}
-
-	if info.IsDir() {
-		node.Type = "dir"
-		entries, err := os.ReadDir(currentPath)
-		if err != nil {
-			return nil, err
+	entries := make([]FileEntry, 0, len(rawEntries))
+	for _, entry := range rawEntries {
+		if strings.HasPrefix(entry.Name(), ".") {
+			continue
 		}
-
-		node.Children = make([]*FileNode, 0)
-		for _, entry := range entries {
-			// Skip hidden files/directories
-			if strings.HasPrefix(entry.Name(), ".") {
+		childPath := filepath.Join(dir, entry.Name())
+		// entry.IsDir() reflects the dirent's own type, which is never "dir"
+		// for a symlink even when it points at one — resolve through the
+		// link so symlinked files/folders aren't silently dropped below.
+		isDir, ok := resolvedIsDir(entry, childPath)
+		if !ok {
+			continue // broken symlink
+		}
+		if isDir {
+			if excludedTreeDirectories[entry.Name()] {
 				continue
 			}
+		} else if !h.extensionAllowed(entry.Name()) {
+			continue
+		}
+		relPath, err := filepath.Rel(root, childPath)
+		if err != nil {
+			continue
+		}
+		relPath = "/" + strings.ReplaceAll(relPath, "\\", "/")
+		entryType := "file"
+		hasChildren := false
+		if isDir {
+			entryType = "dir"
+			hasChildren = h.hasVisibleTreeChildren(childPath)
+		}
+		entries = append(entries, FileEntry{Name: entry.Name(), Path: relPath, Type: entryType, HasChildren: hasChildren})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if (entries[i].Type == "dir") != (entries[j].Type == "dir") {
+			return entries[i].Type == "dir"
+		}
+		return strings.ToLower(entries[i].Name) < strings.ToLower(entries[j].Name)
+	})
+	return entries, nil
+}
 
-			childPath := filepath.Join(currentPath, entry.Name())
-
-			// If it's a file, check extensions
-			if !entry.IsDir() {
-				ext := filepath.Ext(entry.Name())
-				allowed := false
-				for _, allowedExt := range h.AllowedExtensions {
-					if ext == allowedExt {
-						allowed = true
-						break
-					}
-				}
-				if !allowed {
-					continue
-				}
+// hasVisibleTreeChildren reports whether dir has at least one entry that
+// listDirectory would actually show, so the frontend knows whether to render
+// an expand arrow without having to fetch and discard an empty result.
+func (h *FileHandler) hasVisibleTreeChildren(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		isDir, ok := resolvedIsDir(entry, filepath.Join(dir, entry.Name()))
+		if !ok {
+			continue
+		}
+		if isDir {
+			if !excludedTreeDirectories[entry.Name()] {
+				return true
 			}
-
-			childNode, err := h.buildTree(childPath, root)
-			if err != nil {
-				continue // Skip unreadable
-			}
-			node.Children = append(node.Children, childNode)
+			continue
+		}
+		if h.extensionAllowed(entry.Name()) {
+			return true
 		}
 	}
-
-	return node, nil
+	return false
 }
 
 // HandleFile routes GET and POST for single files
@@ -171,21 +209,21 @@ func (h *FileHandler) isPathAllowed(targetPath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if !h.extensionAllowed(fullPath) {
+		return "", fmt.Errorf("file extension %s not allowed", filepath.Ext(fullPath))
+	}
+	return fullPath, nil
+}
 
-	// Check extension
-	ext := filepath.Ext(fullPath)
-	allowed := false
+// extensionAllowed reports whether name's extension is in AllowedExtensions.
+func (h *FileHandler) extensionAllowed(name string) bool {
+	ext := filepath.Ext(name)
 	for _, allowedExt := range h.AllowedExtensions {
 		if ext == allowedExt {
-			allowed = true
-			break
+			return true
 		}
 	}
-	if !allowed {
-		return "", fmt.Errorf("file extension %s not allowed", ext)
-	}
-
-	return fullPath, nil
+	return false
 }
 
 // ReadFile handles GET /api/file?path=...
@@ -300,6 +338,159 @@ func (h *FileHandler) WorkspaceHandler(w http.ResponseWriter, r *http.Request) {
 	if callback != nil {
 		callback(req.ProjectID, req.Path)
 	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+}
+
+// resolveNonRoot resolves a workspace-relative path and additionally rejects
+// the workspace root itself — used by rename/delete, where operating on the
+// root would be catastrophic and is never a legitimate request.
+func (h *FileHandler) resolveNonRoot(reqPath string) (string, error) {
+	root := h.GetRootDir()
+	full, err := (workspacefs.Guard{Root: root}).Resolve(reqPath)
+	if err != nil {
+		return "", err
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	if filepath.Clean(full) == filepath.Clean(absRoot) {
+		return "", fmt.Errorf("cannot operate on the workspace root")
+	}
+	return full, nil
+}
+
+// CreateEntry handles POST /api/files/create — creates a new empty file or
+// directory. This is a direct user action from the file tree (not an agent
+// tool call), so it happens immediately rather than being staged for review.
+func (h *FileHandler) CreateEntry(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Path string `json:"path"`
+		Type string `json:"type"` // "file" or "dir"
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if req.Path == "" {
+		http.Error(w, "path is required", http.StatusBadRequest)
+		return
+	}
+	if req.Type != "file" && req.Type != "dir" {
+		http.Error(w, `type must be "file" or "dir"`, http.StatusBadRequest)
+		return
+	}
+
+	full, err := (workspacefs.Guard{Root: h.GetRootDir()}).Resolve(req.Path)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	if req.Type == "file" && !h.extensionAllowed(full) {
+		http.Error(w, fmt.Sprintf("file extension %s not allowed", filepath.Ext(full)), http.StatusForbidden)
+		return
+	}
+	if _, statErr := os.Lstat(full); statErr == nil {
+		http.Error(w, "already exists", http.StatusConflict)
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
+		http.Error(w, "failed to create parent directory", http.StatusInternalServerError)
+		return
+	}
+
+	if req.Type == "dir" {
+		if err := os.Mkdir(full, 0755); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	} else if err := os.WriteFile(full, nil, 0644); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+}
+
+// RenameEntry handles POST /api/files/rename — renames or moves a file or
+// directory within the workspace.
+func (h *FileHandler) RenameEntry(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Path    string `json:"path"`
+		NewPath string `json:"new_path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if req.Path == "" || req.NewPath == "" {
+		http.Error(w, "path and new_path are required", http.StatusBadRequest)
+		return
+	}
+
+	source, err := h.resolveNonRoot(req.Path)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	if _, statErr := os.Lstat(source); statErr != nil {
+		http.Error(w, "source not found", http.StatusNotFound)
+		return
+	}
+	destination, err := (workspacefs.Guard{Root: h.GetRootDir()}).Resolve(req.NewPath)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	if _, statErr := os.Lstat(destination); statErr == nil {
+		http.Error(w, "a file or directory already exists at the new path", http.StatusConflict)
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(destination), 0755); err != nil {
+		http.Error(w, "failed to create parent directory", http.StatusInternalServerError)
+		return
+	}
+	if err := os.Rename(source, destination); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+}
+
+// DeleteEntry handles POST /api/files/delete — permanently removes a file or
+// directory (recursively). The frontend must confirm with the user before
+// calling this; there is no undo.
+func (h *FileHandler) DeleteEntry(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Path string `json:"path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if req.Path == "" {
+		http.Error(w, "path is required", http.StatusBadRequest)
+		return
+	}
+
+	full, err := h.resolveNonRoot(req.Path)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	if _, statErr := os.Lstat(full); statErr != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	if err := os.RemoveAll(full); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }

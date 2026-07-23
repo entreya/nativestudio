@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
 	"github.com/entreya/nativestudio/db"
@@ -25,6 +26,10 @@ type ToolMeta struct {
 	RunID         string
 	WorkspaceRoot string
 	DB            *db.DB
+	// State carries the current editor context (active/open/recent files) so
+	// tools like find_files can rank results the user is more likely to mean
+	// (e.g. a file they already have open) above unrelated matches.
+	State editor.EditorState
 }
 
 // ToolResult is the structured output from a tool execution.
@@ -58,11 +63,13 @@ func NewRegistry(workspaceRoot string) *Registry {
 		workspaceRoot: workspaceRoot,
 	}
 	registerFilesystemTools(r, workspaceRoot)
+	registerFileSearchTools(r)
 	registerSearchTools(r, workspaceRoot)
 	registerInternetSearchTool(r)
 	registerEditorContextTool(r)
 	registerFollowUpTool(r)
 	registerPatchTools(r)
+	registerCommandTool(r)
 	return r
 }
 
@@ -94,10 +101,19 @@ func registerFollowUpTool(r *Registry) {
 	})
 }
 
-// Register adds a tool to the registry.
+// Register adds a tool to the registry. Tool names must be unique: all tools
+// are registered once at startup from NewRegistry, so a collision is a
+// programming error, not a runtime condition — it panics immediately rather
+// than silently overwriting the earlier tool (which previously happened
+// silently via a plain map assignment) or requiring every call site to
+// check an error for something that should never happen once the binary
+// has started successfully once.
 func (r *Registry) Register(t *Tool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if _, exists := r.tools[t.Name]; exists {
+		panic(fmt.Sprintf("agent: duplicate tool registration: %q", t.Name))
+	}
 	r.tools[t.Name] = t
 }
 

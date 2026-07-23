@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -35,6 +36,7 @@ type Config struct {
 	IndexBatchSize       int    `json:"index_batch_size"`
 	MaximumFileSizeBytes int64  `json:"maximum_file_size_bytes"`
 	OllamaConcurrency    int    `json:"ollama_concurrency"`
+	MaxAgentToolSteps    int    `json:"max_agent_tool_steps"`
 	Context              struct {
 		YellowThreshold     float64 `json:"yellow_threshold"`
 		RedThreshold        float64 `json:"red_threshold"`
@@ -132,7 +134,7 @@ func main() {
 			indexCoordinator.Start(projectID, path)
 		}
 	})
-	agentRunner := agent.NewAgent(cfg.OllamaURL, registry, database, editorSvc, res)
+	agentRunner := agent.NewAgent(cfg.OllamaURL, registry, database, editorSvc, res, cfg.MaxAgentToolSteps)
 
 	chatHandler := handlers.NewChatHandler(cfg.OllamaURL, ctxCfg, agentRunner, database)
 	chatHandler.RegisterRoutes(mux)
@@ -148,10 +150,25 @@ func main() {
 	changesHandler.RegisterRoutes(mux)
 	patchHandler := handlers.NewPatchHandler(database, indexCoordinator)
 	patchHandler.RegisterRoutes(mux)
+	commandHandler := handlers.NewCommandHandler(database, indexCoordinator)
+	commandHandler.RegisterRoutes(mux)
 
-	// Serve static frontend files (from the React build)
-	fs := http.FileServer(http.Dir("./frontend/dist"))
-	mux.Handle("/", fs)
+	// Serve static frontend files (from the React build). The frontend is a
+	// client-routed SPA (react-router), so any path that isn't a real file in
+	// dist/ (e.g. /projects/abc123) must still resolve to index.html rather
+	// than 404 — otherwise a deep link or hard refresh on a client route breaks.
+	const staticDir = "./frontend/dist"
+	fileServer := http.FileServer(http.Dir(staticDir))
+	mux.Handle("/", func() http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			full := filepath.Join(staticDir, filepath.Clean(r.URL.Path))
+			if info, err := os.Stat(full); err != nil || info.IsDir() {
+				http.ServeFile(w, r, filepath.Join(staticDir, "index.html"))
+				return
+			}
+			fileServer.ServeHTTP(w, r)
+		}
+	}())
 
 	// Start server. Default to loopback-only: this app grants an LLM tool-calling
 	// access to the local filesystem, so it must not be reachable from the network

@@ -74,6 +74,12 @@ type AgentRun struct {
 	// State holds the editor context for the get_editor_context tool.
 	State editor.EditorState
 	DB    *db.DB
+	// Paused is set when the run stopped to ask the user a clarifying
+	// question (via ask_follow_up or a narrated equivalent) rather than to
+	// give a final answer — a legitimate reason to have made zero tool
+	// calls, so Run()'s corrective retry must not treat it as the
+	// "described the action instead of doing it" failure mode.
+	Paused bool
 }
 
 // DefaultMaxSteps is the maximum number of tool-call iterations before the agent stops.
@@ -235,6 +241,7 @@ func (run *AgentRun) Step(
 	// into the same structured clarification UI.
 	if !run.Direct && len(toolCalls) == 0 {
 		if followUp, ok := parseNarratedFollowUp(contentBuf.String()); ok {
+			run.Paused = true
 			contentBuf.Reset()
 			emit("replace_content", map[string]any{"text": ""})
 			emit("follow_up", followUp)
@@ -282,6 +289,7 @@ func (run *AgentRun) Step(
 		// Clarification is a pause in the agent run, not an executable action.
 		// The next user response resumes naturally as a new chat turn.
 		if tc.Function.Name == "ask_follow_up" {
+			run.Paused = true
 			question, _ := args["question"].(string)
 			if strings.TrimSpace(question) == "" {
 				question = "Could you clarify what you would like me to do?"
@@ -319,7 +327,7 @@ func (run *AgentRun) Step(
 			result = ToolResult{OK: false, Error: fmt.Sprintf("unknown tool: %s", tc.Function.Name)}
 		} else {
 			var execErr error
-			meta := ToolMeta{SessionID: run.SessionID, RunID: run.RunID, WorkspaceRoot: registry.WorkspaceRoot(), DB: run.DB}
+			meta := ToolMeta{SessionID: run.SessionID, RunID: run.RunID, WorkspaceRoot: registry.WorkspaceRoot(), DB: run.DB, State: run.State}
 			result, execErr = tool.Execute(ctx, args, meta)
 			if execErr != nil {
 				result = ToolResult{OK: false, Error: execErr.Error()}
@@ -329,7 +337,11 @@ func (run *AgentRun) Step(
 		if found && tool.Safety >= RequiresApproval && result.OK {
 			if output, ok := result.Content.(map[string]any); ok {
 				staged, _ := output["staged"].(bool)
-				if staged {
+				if staged && tc.Function.Name == "run_command" {
+					emit("command_staged", map[string]any{
+						"run_id": output["run_id"], "command": output["command"], "cwd": output["cwd"],
+					})
+				} else if staged {
 					emit("patch_staged", map[string]any{
 						"patch_id": output["patch_id"], "file_path": output["file_path"],
 						"operation": output["operation"], "diff": output["diff"],

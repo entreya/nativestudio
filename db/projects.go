@@ -45,9 +45,23 @@ func (d *DB) ListProjects() ([]Project, error) {
 func (d *DB) GetProject(id string) (*Project, error) {
 	var p Project
 	err := d.QueryRow(`
-		SELECT id, name, path, description, created_at, updated_at 
+		SELECT id, name, path, description, created_at, updated_at
 		FROM projects WHERE id = ?
 	`, id).Scan(&p.ID, &p.Name, &p.Path, &p.Description, &p.CreatedAt, &p.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+// GetProjectByPath looks up a project by its workspace path. Returns
+// (nil, sql.ErrNoRows) when no project is registered for that path.
+func (d *DB) GetProjectByPath(path string) (*Project, error) {
+	var p Project
+	err := d.QueryRow(`
+		SELECT id, name, path, description, created_at, updated_at
+		FROM projects WHERE path = ?
+	`, path).Scan(&p.ID, &p.Name, &p.Path, &p.Description, &p.CreatedAt, &p.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}

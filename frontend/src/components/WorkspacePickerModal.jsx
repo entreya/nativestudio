@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Alert, Breadcrumb, Button, Empty, Modal, Space, Spin, Tree, Typography } from 'antd';
-import { AppstoreOutlined, FileOutlined, FolderOpenOutlined, FolderOutlined, HomeOutlined, ReloadOutlined } from '@ant-design/icons';
+import { AppstoreOutlined, FolderOpenOutlined, FolderOutlined, HomeOutlined, ReloadOutlined } from '@ant-design/icons';
+import { FileTypeIcon } from '../fileIcons';
 
 const { DirectoryTree } = Tree;
 const { Text } = Typography;
@@ -30,6 +31,7 @@ const pathCrumbs = path => {
 
 export default function WorkspacePickerModal({ open, mode = 'folder', projects = [], onCancel, onSelect }) {
   const [treeData, setTreeData] = useState([]);
+  const [expandedKeys, setExpandedKeys] = useState([]);
   const [rootPath, setRootPath] = useState('');
   const [homePath, setHomePath] = useState('');
   const [selected, setSelected] = useState(null);
@@ -59,6 +61,12 @@ export default function WorkspacePickerModal({ open, mode = 'folder', projects =
         isLeaf: false,
         children: (data.entries || []).map(toNode),
       }]);
+      // Only the root starts expanded — its children were already fetched
+      // above. Deeper levels load lazily via loadData when the user actually
+      // clicks into them; auto-expanding everything (the previous behavior)
+      // cascaded into fetching and rendering the entire subtree at once,
+      // which is what made this hang on large projects.
+      setExpandedKeys([data.current]);
     } catch (cause) {
       setTreeData([]);
       setError(cause.message);
@@ -121,15 +129,19 @@ export default function WorkspacePickerModal({ open, mode = 'folder', projects =
           {loading ? <div className="workspace-picker-loading"><Spin /></div> : treeData.length ? (
             <DirectoryTree
               showIcon
-              defaultExpandAll
+              showLine={{ showLeafIcon: false }}
               treeData={treeData}
+              expandedKeys={expandedKeys}
+              onExpand={setExpandedKeys}
               loadData={loadNode}
               selectedKeys={selected ? [selected.key] : []}
               onSelect={(_, info) => setSelected({ key: info.node.key, type: info.node.type })}
               onDoubleClick={(_, node) => {
                 if (node.type === 'file' && mode === 'file') onSelect(node.key);
               }}
-              icon={node => node.type === 'file' ? <FileOutlined /> : node.expanded ? <FolderOpenOutlined /> : <FolderOutlined />}
+              icon={node => node.type === 'file'
+                ? <FileTypeIcon filename={node.title || ''} />
+                : node.expanded ? <FolderOpenOutlined /> : <FolderOutlined />}
             />
           ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No matching files or folders" />}
         </section>

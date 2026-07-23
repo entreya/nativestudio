@@ -75,20 +75,28 @@ func (h *SystemHandler) Browse(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(entry.Name(), ".") {
 			continue
 		}
+		path := filepath.Join(absolute, entry.Name())
+		// entry.IsDir() reflects the directory entry's own type, which for a
+		// symlink is never "directory" even when it points at one — so
+		// symlinked folders and files were silently dropped below. Stat
+		// through the link to find out what it actually points to.
+		isDir, ok := resolvedIsDir(entry, path)
+		if !ok {
+			continue // broken symlink — nothing usable to show
+		}
 		entryType := "file"
-		if entry.IsDir() {
+		if isDir {
 			entryType = "dir"
 		} else {
 			if mode == "folder" || !h.extensionAllowed(entry.Name()) {
 				continue
 			}
 		}
-		path := filepath.Join(absolute, entry.Name())
 		items = append(items, browserEntry{
 			Name:        entry.Name(),
 			Path:        path,
 			Type:        entryType,
-			HasChildren: entry.IsDir() && h.hasVisibleChildren(path, mode),
+			HasChildren: isDir && h.hasVisibleChildren(path, mode),
 		})
 	}
 	sort.Slice(items, func(i, j int) bool {
@@ -125,11 +133,29 @@ func (h *SystemHandler) hasVisibleChildren(path, mode string) bool {
 		if strings.HasPrefix(entry.Name(), ".") {
 			continue
 		}
-		if entry.IsDir() || (mode == "file" && h.extensionAllowed(entry.Name())) {
+		isDir, ok := resolvedIsDir(entry, filepath.Join(path, entry.Name()))
+		if !ok {
+			continue
+		}
+		if isDir || (mode == "file" && h.extensionAllowed(entry.Name())) {
 			return true
 		}
 	}
 	return false
+}
+
+// resolvedIsDir reports whether entry is a directory, following the link if
+// it is a symlink. The second return value is false for a broken symlink
+// (nothing to show for it).
+func resolvedIsDir(entry os.DirEntry, fullPath string) (isDir bool, ok bool) {
+	if entry.Type()&os.ModeSymlink == 0 {
+		return entry.IsDir(), true
+	}
+	info, err := os.Stat(fullPath)
+	if err != nil {
+		return false, false
+	}
+	return info.IsDir(), true
 }
 
 func isLoopbackRequest(r *http.Request) bool {
