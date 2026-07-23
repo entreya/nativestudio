@@ -19,10 +19,10 @@ import {
   CheckOutlined,
   CloseOutlined,
 } from '@ant-design/icons';
-import AgentTimeline from './AgentTimeline';
-import ThinkingBlock from './ThinkingBlock';
+import ThinkingTimeline from './ThinkingTimeline';
 import CodeSnippet from './CodeSnippet';
 import PatchReview from './PatchReview';
+import CommandReview from './CommandReview';
 
 const { Text } = Typography;
 const { TextArea } = Input;
@@ -49,20 +49,32 @@ function sameWorkspacePath(left, right) {
   return normalize(left) === normalize(right);
 }
 
-/**
- * ChatPanel provides the full AI assistant interface.
- *
- * Props:
- *  - activeFilePath: string — currently active file path in the editor
- *  - activeProject: object — the selected project
- *  - editorContext: object — full editor state from useEditorContext hook
- *  - requestedSessionId: string — optional session selected from the overview
- */
+// ── Timeline reducer helpers ────────────────────────────────────────────────
+// The agent's run is rendered as one chronological list of entries (context
+// gathering, thinking, tool calls) instead of separate thinking/tool-call
+// state, so the UI reads as a single linear trace the way Claude's own
+// transcript does.
+
+function closeRunningEntries(timeline) {
+  return timeline.map(entry => entry.status === 'running' ? { ...entry, status: 'done' } : entry);
+}
+
+function withContextEntry(timeline, apply) {
+  const index = timeline.findIndex(entry => entry.kind === 'context');
+  if (index === -1) {
+    return [...timeline, apply({ id: 'context', kind: 'context', status: 'running', items: [], count: 0 })];
+  }
+  const next = [...timeline];
+  next[index] = apply(next[index]);
+  return next;
+}
+
 export default function ChatPanel({
   activeFilePath,
   activeProject,
   editorContext,
   requestedSessionId,
+  onFilesChanged,
 }) {
   const [models, setModels] = useState([]);
   const [currentModel, setCurrentModel] = useState('');
@@ -83,36 +95,29 @@ export default function ChatPanel({
   const [editingMessage, setEditingMessage] = useState(null);
   const [editDraft, setEditDraft] = useState('');
   const [pendingPatches, setPendingPatches] = useState([]);
+  const [pendingCommands, setPendingCommands] = useState([]);
 
   const [agentRunning, setAgentRunning] = useState(false);
-  // The active buffer is useful context in an editor assistant, including any
-  // unsaved changes. Users can still opt out for an individual request.
   const [includeFile, setIncludeFile] = useState(true);
 
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
   const abortControllerRef = useRef(null);
-  const streamStateRef = useRef({ assistantText: '', thinkingText: '', completionChars: 0, thinkingChars: 0 });
+  const streamStateRef = useRef({ assistantText: '', completionChars: 0, thinkingChars: 0 });
 
   const supportsThinking = (model) => /^(qwen3|deepseek-r1|deepseek-v3\.1|gpt-oss)/i.test(model || '');
 
-  // Abort any in-flight chat stream if this panel unmounts (project switch,
-  // view change) — otherwise the fetch keeps running and its .then/setState
-  // calls fire against an unmounted component.
   useEffect(() => {
     return () => abortControllerRef.current?.abort();
   }, []);
 
-  // ── Model loading ──────────────────────────────────────────────────────────
   useEffect(() => {
     fetch('/api/models')
       .then(res => res.json())
       .then(data => {
         if (data.models && data.models.length > 0) {
           setModels(data.models);
-          const defaultModel = data.models.includes(data.default_model)
-            ? data.default_model
-            : data.models[0];
+          const defaultModel = data.models.includes(data.default_model) ? data.default_model : data.models[0];
           setCurrentModel(defaultModel);
           setIsThinkingModel(supportsThinking(defaultModel));
         }
@@ -126,11 +131,8 @@ export default function ChatPanel({
     if (!supported) setThinkMode(false);
   };
 
-  // ── Session management ─────────────────────────────────────────────────────
   useEffect(() => {
-    if (activeProject) {
-      loadSessions();
-    }
+    if (activeProject) loadSessions();
   }, [activeProject]);
 
   async function loadSessions() {
@@ -175,14 +177,11 @@ export default function ChatPanel({
 
   const handleDeleteSession = async (session) => {
     if (!session || agentRunning) return;
-
     try {
       const res = await fetch(`/api/sessions/${session.id}`, { method: 'DELETE' });
       if (!res.ok) throw new Error('Failed to delete conversation');
-
       const remaining = sessions.filter(s => s.id !== session.id);
       setSessions(remaining);
-
       if (activeSession?.id === session.id) {
         setActiveSession(null);
         setMessages([]);
@@ -203,14 +202,17 @@ export default function ChatPanel({
     setSessionsOpen(false);
 
     try {
-      const [messagesResponse, patchesResponse] = await Promise.all([
+      const [messagesResponse, patchesResponse, commandsResponse] = await Promise.all([
         fetch(`/api/sessions/${sess.id}/messages`),
         fetch(`/api/sessions/${sess.id}/patches?status=pending`),
+        fetch(`/api/sessions/${sess.id}/commands?status=pending`),
       ]);
       const data = await messagesResponse.json();
       if (messagesResponse.ok) setMessages(data.messages || []);
       const patchData = await patchesResponse.json();
       setPendingPatches(patchesResponse.ok ? (patchData.patches || []) : []);
+      const commandData = await commandsResponse.json();
+      setPendingCommands(commandsResponse.ok ? (commandData.commands || []) : []);
     } catch (e) {
       console.error(e);
     }
@@ -236,7 +238,6 @@ export default function ChatPanel({
     }
   }
 
-  // ── Send message ───────────────────────────────────────────────────────────
   const handleSend = async (customPrompt) => {
     const promptText = typeof customPrompt === 'string' ? customPrompt : input.trim();
     if (!promptText || agentRunning || !activeSession) return;
@@ -245,12 +246,17 @@ export default function ChatPanel({
       ? window.getCurrentContent()
       : '';
 
-    setMessages(prev => [...prev, { role: 'user', content: promptText }]);
+    // The assistant placeholder is pushed immediately (not after the fetch
+    // resolves) so there's something on screen — a running timeline row —
+    // the instant the user hits send, instead of a dead gap until the
+    // network round trip and any backend context-resolution work finishes.
+    setMessages(prev => [...prev, { role: 'user', content: promptText }, { role: 'assistant', content: '', timeline: [] }]);
     setInput('');
     setPendingPatches([]);
+    setPendingCommands([]);
     setAgentRunning(true);
     const estimatedPromptTokens = Math.ceil((promptText.length + activeFileContent.length) / 4);
-    streamStateRef.current = { assistantText: '', thinkingText: '', completionChars: 0, thinkingChars: 0 };
+    streamStateRef.current = { assistantText: '', completionChars: 0, thinkingChars: 0 };
     setLiveUsage({ prompt: estimatedPromptTokens, completion: 0 });
 
     const controller = new AbortController();
@@ -266,30 +272,25 @@ export default function ChatPanel({
           session_id: activeSession.id,
           think: thinkMode,
           think_level: thinkLevel,
-          // Send full editor context with every request
-          editor_context: editorContext ? {
-            ...editorContext,
-            active_file_content: activeFileContent,
-          } : null,
+          editor_context: editorContext ? { ...editorContext, active_file_content: activeFileContent } : null,
         }),
         signal: controller.signal,
       });
 
       if (response.status === 429) {
-        setMessages(prev => [...prev, { role: 'system', content: "Error: Context full. Summarizing..." }]);
+        // Replace the placeholder assistant bubble (rather than leaving an
+        // empty one behind) with the actual error.
+        setMessages(prev => [...prev.slice(0, -1), { role: 'system', content: "Error: Context full. Summarizing..." }]);
         setAgentRunning(false);
         refreshContext();
         return;
       }
-
       if (!response.ok || !response.body) {
         throw new Error(`Chat request failed with status ${response.status}`);
       }
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder("utf-8");
-
-      setMessages(prev => [...prev, { role: 'assistant', content: '', toolCalls: [] }]);
 
       let sseBuffer = '';
       while (true) {
@@ -305,11 +306,8 @@ export default function ChatPanel({
           try {
             const parsed = JSON.parse(line.substring(6));
             if (parsed.done) break;
-
             const { type, data } = parsed;
 
-            // Keep stream accumulators outside React state updaters. React
-            // Strict Mode may invoke updater functions twice in development.
             if (type === 'token') {
               streamStateRef.current.assistantText += data.text;
               streamStateRef.current.completionChars += data.text.length;
@@ -317,144 +315,86 @@ export default function ChatPanel({
             } else if (type === 'replace_content') {
               streamStateRef.current.assistantText = data.text || '';
             } else if (type === 'thinking_token') {
-              streamStateRef.current.thinkingText += data.text;
               streamStateRef.current.thinkingChars += data.text.length;
               setLiveUsage(prev => ({ ...prev, completion: Math.ceil((streamStateRef.current.completionChars + streamStateRef.current.thinkingChars) / 4) }));
             } else if (type === 'usage') {
               const total = data.total_tokens || 0;
               setLiveUsage({ prompt: data.prompt_tokens || 0, completion: data.completion_tokens || 0 });
-              setContextData(prev => ({
-                ...prev,
-                tokensUsed: total,
-                pct: prev.tokensTotal ? Math.round((total / prev.tokensTotal) * 100) : prev.pct,
-              }));
-            }
-            const assistantTextSnapshot = streamStateRef.current.assistantText;
-            const thinkingTextSnapshot = streamStateRef.current.thinkingText;
-            if (type === 'patch_staged') {
+              setContextData(prev => ({ ...prev, tokensUsed: total, pct: prev.tokensTotal ? Math.round((total / prev.tokensTotal) * 100) : prev.pct }));
+            } else if (type === 'patch_staged') {
               setPendingPatches(previous => previous.some(patch => patch.patch_id === data.patch_id) ? previous : [...previous, data]);
+            } else if (type === 'command_staged') {
+              setPendingCommands(previous => previous.some(cmd => cmd.run_id === data.run_id) ? previous : [...previous, data]);
             } else if (type === 'session_metadata') {
               setActiveSession(session => session?.id === data.session_id ? { ...session, title: data.title, summary: data.summary } : session);
-              setSessions(items => items.map(session => session.id === data.session_id
-                ? { ...session, title: data.title, summary: data.summary }
-                : session));
+              setSessions(items => items.map(session => session.id === data.session_id ? { ...session, title: data.title, summary: data.summary } : session));
             }
 
+            const assistantTextSnapshot = streamStateRef.current.assistantText;
+
             setMessages(prev => {
-              const newArr = prev.map((message, index) => index === prev.length - 1
-                ? {
-                    ...message,
-                    toolCalls: message.toolCalls?.map(call => ({ ...call })),
-                    activities: message.activities?.map(activity => ({
-                      ...activity,
-                      toolCall: activity.toolCall ? { ...activity.toolCall } : undefined,
-                    })),
-                  }
-                : message);
-              const lastMsg = newArr[newArr.length - 1];
+              const newArr = [...prev];
+              const lastMsg = { ...newArr[newArr.length - 1], timeline: [...(newArr[newArr.length - 1].timeline || [])] };
+              newArr[newArr.length - 1] = lastMsg;
 
               switch (type) {
                 case 'token':
-				  lastMsg.content = assistantTextSnapshot;
-                  break;
-
                 case 'replace_content':
-				  lastMsg.content = assistantTextSnapshot;
+                  lastMsg.content = assistantTextSnapshot;
+                  lastMsg.timeline = closeRunningEntries(lastMsg.timeline);
                   break;
 
-                case 'thinking_token':
-                  lastMsg.thinkingText = thinkingTextSnapshot;
+                case 'thinking_token': {
+                  const timeline = lastMsg.timeline;
+                  const last = timeline[timeline.length - 1];
+                  if (last && last.kind === 'thinking' && last.status === 'running') {
+                    timeline[timeline.length - 1] = { ...last, text: (last.text || '') + data.text };
+                  } else {
+                    timeline.push({ id: `thinking-${timeline.length}`, kind: 'thinking', status: 'running', text: data.text });
+                  }
                   break;
+                }
 
                 case 'thinking_unavailable':
                   lastMsg.thinkingNotice = data.message;
                   break;
 
-                case 'tool_call': {
-                  if (!lastMsg.toolCalls) lastMsg.toolCalls = [];
-                  if (!lastMsg.activities) lastMsg.activities = [];
-                  const toolCall = {
-                    id: data.id,
-                    name: data.name,
-                    input: data.input,
-                    status: 'running',
-                  };
-                  lastMsg.toolCalls.push(toolCall);
-                  lastMsg.activities = lastMsg.activities.map(activity => activity.status === 'running'
-                    ? { ...activity, status: 'done' }
-                    : activity);
-                  const activityLabel = data.name === 'search_internet'
-                    ? `Searching: ${data.input?.query || 'the internet'}`
-                    : `Using ${data.name}`;
-                  lastMsg.activities.push({ id: data.id, kind: 'tool', label: activityLabel, status: 'running', toolCall });
+                case 'tool_call':
+                  lastMsg.timeline = closeRunningEntries(lastMsg.timeline);
+                  lastMsg.timeline.push({ id: data.id, kind: 'tool', status: 'running', name: data.name, input: data.input });
                   break;
-                }
 
-                case 'tool_result': {
-                  if (lastMsg.toolCalls) {
-                    const call = lastMsg.toolCalls.find(tc => tc.id === data.id);
-                    if (call) {
-                      call.output = data.output;
-                      call.error = data.error;
-                      call.status = data.ok ? 'done' : 'error';
-                    }
-                  }
-                  if (lastMsg.activities) {
-                    const activity = lastMsg.activities.find(item => item.id === data.id);
-                    if (activity) {
-                      activity.status = data.ok ? 'done' : 'error';
-                      activity.label = data.name === 'search_internet'
-                        ? `${data.ok ? 'Searched' : 'Search failed'}: ${activity.toolCall?.input?.query || 'the internet'}`
-                        : data.ok ? `Completed ${data.name}` : `${data.name} failed`;
-                      activity.toolCall = lastMsg.toolCalls?.find(item => item.id === data.id);
-                    }
-                  }
+                case 'tool_result':
+                  lastMsg.timeline = lastMsg.timeline.map(entry => entry.id === data.id
+                    ? { ...entry, status: data.ok ? 'done' : 'error', output: data.output, error: data.error }
+                    : entry);
                   break;
-                }
 
                 case 'context_resolved':
-                  // Attach resolved context to the last assistant message
-                  lastMsg.resolvedContext = data;
-                  if (!lastMsg.activities) lastMsg.activities = [];
-                  lastMsg.activities.push({ id: `context-${lastMsg.activities.length}`, kind: 'context', label: `Resolved ${data.file}`, status: 'done' });
+                  lastMsg.timeline = withContextEntry(lastMsg.timeline, entry => ({
+                    ...entry,
+                    items: [...entry.items, { label: `${data.file}${data.symbol ? ` › ${data.symbol.name}` : ''} (${data.confidence})` }],
+                    count: entry.count + 1,
+                  }));
                   break;
 
                 case 'context_candidate':
-                  if (!lastMsg.activities) lastMsg.activities = [];
-                  lastMsg.activities.push({
-                    id: `candidate-${lastMsg.activities.length}`,
-                    kind: 'context',
-                    label: `Knowledge: ${data.path || data.kind}${data.symbol ? ` › ${data.symbol}` : ''}`,
-                    status: 'done',
-                  });
+                  lastMsg.timeline = withContextEntry(lastMsg.timeline, entry => ({
+                    ...entry,
+                    items: [...entry.items, { label: `${data.path || data.kind}${data.symbol ? ` › ${data.symbol}` : ''}` }],
+                    count: entry.count + 1,
+                  }));
                   break;
 
                 case 'context_built':
-                  if (!lastMsg.activities) lastMsg.activities = [];
-                  lastMsg.contextBuild = data;
-                  lastMsg.activities.push({ id: `context-built-${lastMsg.activities.length}`, kind: 'context', label: `Context built · ${data.tokens || 0} / ${data.budget || 0} tokens`, status: 'done' });
-                  break;
-
-                case 'agent_start':
-                  if (!lastMsg.activities) lastMsg.activities = [];
-                  lastMsg.activities.push({ id: `start-${data.run_id}`, kind: 'agent', label: 'Agent started', status: 'done' });
-                  break;
-
-                case 'agent_step':
-                  if (!lastMsg.activities) lastMsg.activities = [];
-                  lastMsg.activities = lastMsg.activities.map(activity => activity.status === 'running'
-                    ? { ...activity, status: 'done' }
-                    : activity);
-                  lastMsg.activities.push({ id: `step-${data.step}-${lastMsg.activities.length}`, kind: 'step', label: `Step ${data.step}: ${data.message}`, status: 'running' });
+                  lastMsg.timeline = withContextEntry(lastMsg.timeline, entry => ({
+                    ...entry, status: 'done', tokens: data.tokens, budget: data.budget,
+                  }));
                   break;
 
                 case 'follow_up':
+                  lastMsg.timeline = closeRunningEntries(lastMsg.timeline);
                   lastMsg.followUp = data;
-                  break;
-
-                case 'patch_staged':
-                  if (!lastMsg.activities) lastMsg.activities = [];
-                  lastMsg.activities.push({ id: `patch-${data.patch_id}`, kind: 'tool', label: `Staged ${data.operation}: ${data.file_path}`, status: 'done' });
                   break;
 
                 case 'message_saved': {
@@ -471,18 +411,9 @@ export default function ChatPanel({
                   lastMsg.usage = data;
                   break;
 
-                case 'session_metadata':
+                case 'agent_done':
+                  lastMsg.timeline = closeRunningEntries(lastMsg.timeline);
                   break;
-
-                case 'agent_done': {
-                  if (lastMsg.activities) {
-                    lastMsg.activities = lastMsg.activities.map(activity => activity.status === 'running'
-                      ? { ...activity, status: 'done' }
-                      : activity);
-                    lastMsg.activities.push({ id: `done-${data.run_id}`, kind: 'agent', label: 'Response completed', status: 'done' });
-                  }
-                  break;
-                }
 
                 case 'error':
                   newArr.push({ role: 'system', content: `Agent error: ${data.message}` });
@@ -495,15 +426,12 @@ export default function ChatPanel({
               return newArr;
             });
 
-            if (type === 'agent_done') {
-              setAgentRunning(false);
-            }
+            if (type === 'agent_done') setAgentRunning(false);
           } catch { /* ignore malformed SSE events */ }
         }
       }
 
       setAgentRunning(false);
-
     } catch (e) {
       if (e.name === 'AbortError') {
         setMessages(prev => {
@@ -518,7 +446,18 @@ export default function ChatPanel({
         });
       } else {
         console.error(e);
-        setMessages(prev => [...prev, { role: 'system', content: "Error connecting to backend." }]);
+        setMessages(prev => {
+          const next = [...prev];
+          const last = next[next.length - 1];
+          // Replace the empty placeholder bubble rather than leaving it
+          // behind alongside a separate error message.
+          if (last?.role === 'assistant' && !last.content && !(last.timeline || []).length) {
+            next[next.length - 1] = { role: 'system', content: "Error connecting to backend." };
+          } else {
+            next.push({ role: 'system', content: "Error connecting to backend." });
+          }
+          return next;
+        });
       }
     } finally {
       abortControllerRef.current = null;
@@ -579,8 +518,11 @@ export default function ChatPanel({
     const resolved = action === 'approve' ? (data.applied || []) : (data.rejected || patchIDs);
     const resolvedPatches = pendingPatches.filter(patch => resolved.includes(patch.patch_id));
     setPendingPatches(previous => previous.filter(patch => !resolved.includes(patch.patch_id)));
-    if (action === 'approve' && resolvedPatches.some(patch => sameWorkspacePath(patch.file_path, activeFilePath))) {
-      await window.reloadCurrentFile?.();
+    if (action === 'approve' && resolved.length > 0) {
+      onFilesChanged?.();
+      if (resolvedPatches.some(patch => sameWorkspacePath(patch.file_path, activeFilePath))) {
+        await window.reloadCurrentFile?.();
+      }
     }
     if (data.failed?.length) {
       throw new Error(data.failed.map(item => `${item.patch_id}: ${item.error}`).join('\n'));
@@ -591,6 +533,43 @@ export default function ChatPanel({
   const handleRejectPatch = patchID => resolvePatches('reject', [patchID]);
   const handleApproveAll = () => resolvePatches('approve', pendingPatches.map(patch => patch.patch_id));
   const handleRejectAll = () => resolvePatches('reject', pendingPatches.map(patch => patch.patch_id));
+
+  const resolveCommands = async (action, runIDs) => {
+    if (!activeSession || runIDs.length === 0) return;
+    const response = await fetch(`/api/sessions/${activeSession.id}/commands/${action}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ run_ids: runIDs }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.message || `Could not ${action} commands`);
+    if (action === 'approve') {
+      const results = data.completed || [];
+      if (results.length > 0) {
+        setPendingCommands(previous => previous.map(cmd => {
+          const result = results.find(r => r.run_id === cmd.run_id);
+          return result ? { ...cmd, status: result.status, output: result.output } : cmd;
+        }));
+        // A completed install/scaffold command can add or change many files
+        // at once — let the sidebar and open buffers know to refresh.
+        if (results.some(r => r.status === 'completed')) {
+          onFilesChanged?.();
+          await window.reloadCurrentFile?.();
+        }
+      }
+    } else {
+      const rejected = data.rejected || runIDs;
+      setPendingCommands(previous => previous.filter(cmd => !rejected.includes(cmd.run_id)));
+    }
+    if (data.failed?.length) {
+      throw new Error(data.failed.map(item => `${item.run_id}: ${item.error}`).join('\n'));
+    }
+  };
+
+  const handleApproveCommand = runID => resolveCommands('approve', [runID]);
+  const handleRejectCommand = runID => resolveCommands('reject', [runID]);
+  const handleApproveAllCommands = () => resolveCommands('approve', pendingCommands.filter(cmd => !cmd.status || cmd.status === 'pending').map(cmd => cmd.run_id));
+  const handleRejectAllCommands = () => resolveCommands('reject', pendingCommands.filter(cmd => !cmd.status || cmd.status === 'pending').map(cmd => cmd.run_id));
 
   const hasFollowUpAnswer = (messageIndex) => {
     const answer = followUpAnswers[messageIndex];
@@ -605,14 +584,11 @@ export default function ChatPanel({
     return <div style={{ padding: 16, textAlign: 'center', color: 'var(--studio-muted, #746b63)' }}>No project selected</div>;
   }
 
-  // Derive context badge label from editor context
   const activeFile = editorContext?.active_file || '';
   const selectedSymbol = editorContext?.selected_symbol;
   const contextBadgeLabel = selectedSymbol
     ? `${selectedSymbol.kind} ${selectedSymbol.name}`
-    : activeFile
-    ? activeFile.split('/').pop()
-    : null;
+    : activeFile ? activeFile.split('/').pop() : null;
 
   return (
     <ConfigProvider theme={{
@@ -628,19 +604,12 @@ export default function ChatPanel({
     }}>
       <div style={{ display: 'flex', flexDirection: 'column', height: '100%', width: '100%', backgroundColor: 'var(--studio-bg, #f7f4ed)' }}>
 
-        {/* Header */}
-        <div style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 16px',
-          borderBottom: '1px solid var(--studio-border, #d8d1c5)'
-        }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 16px', borderBottom: '1px solid var(--studio-border, #d8d1c5)' }}>
           <button
             type="button"
             onClick={() => setSessionsOpen(open => !open)}
             title="Switch conversation"
-            style={{
-              minWidth: 0, maxWidth: 'calc(100% - 36px)', padding: 0, display: 'flex', alignItems: 'center', gap: 8,
-              color: 'var(--studio-text, #2f2a26)', border: 0, background: 'transparent', cursor: 'pointer', textAlign: 'left',
-            }}
+            style={{ minWidth: 0, maxWidth: 'calc(100% - 36px)', padding: 0, display: 'flex', alignItems: 'center', gap: 8, color: 'var(--studio-text, #2f2a26)', border: 0, background: 'transparent', cursor: 'pointer', textAlign: 'left' }}
           >
             <StarFilled style={{ fontSize: 16, color: 'var(--studio-accent, #c15f3c)' }} />
             <Text strong ellipsis style={{ minWidth: 0, color: 'var(--studio-text, #2f2a26)', fontSize: '14px' }}>
@@ -676,27 +645,16 @@ export default function ChatPanel({
                     onConfirm={(e) => { e?.stopPropagation(); handleDeleteSession(s); }}
                     onCancel={(e) => e?.stopPropagation()}
                   >
-                    <Button
-                      type="text"
-                      danger
-                      size="small"
-                      aria-label={`Delete ${s.title}`}
-                      icon={<DeleteOutlined />}
-                      disabled={agentRunning}
-                      onClick={(e) => e.stopPropagation()}
-                    />
+                    <Button type="text" danger size="small" aria-label={`Delete ${s.title}`} icon={<DeleteOutlined />} disabled={agentRunning} onClick={(e) => e.stopPropagation()} />
                   </Popconfirm>
                 </div>
               ))}
             </div>
           )}
 
-          {/* Context Window */}
           <div>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-              <Text style={{ fontSize: '11px', color: 'var(--studio-subtle, #91877e)', letterSpacing: 1, fontWeight: 600 }}>
-                CONTEXT WINDOW
-              </Text>
+              <Text style={{ fontSize: '11px', color: 'var(--studio-subtle, #91877e)', letterSpacing: 1, fontWeight: 600 }}>CONTEXT WINDOW</Text>
               <div style={{ backgroundColor: 'var(--studio-surface, #fffdf8)', border: '1px solid var(--studio-border, #d8d1c5)', padding: '2px 8px', borderRadius: 12, fontSize: '10px', color: '#6b8f71', fontWeight: 600 }}>
                 {contextData.pct}% · {(contextData.tokensUsed || 0).toLocaleString()} / {(contextData.tokensTotal || 0).toLocaleString()}
               </div>
@@ -716,7 +674,6 @@ export default function ChatPanel({
           </div>
         </div>
 
-        {/* Messages */}
         <div style={{ flexGrow: 1, overflowY: 'auto', padding: 16, display: 'flex', flexDirection: 'column', gap: 16 }}>
           {messages.length === 0 ? (
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', gap: 16, padding: '24px 0' }}>
@@ -726,27 +683,9 @@ export default function ChatPanel({
                 Ask about your code, get explanations, or request changes.
               </Text>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8, width: '100%' }}>
-                <Button
-                  style={{ backgroundColor: 'transparent', borderColor: 'var(--studio-border, #d8d1c5)', color: 'var(--studio-text, #2f2a26)', justifyContent: 'flex-start', padding: '0 12px', height: 36 }}
-                  icon={<BulbOutlined style={{ color: 'var(--studio-muted, #746b63)' }} />}
-                  onClick={() => handleSend('Explain this file')}
-                >
-                  Explain this file
-                </Button>
-                <Button
-                  style={{ backgroundColor: 'transparent', borderColor: 'var(--studio-border, #d8d1c5)', color: 'var(--studio-text, #2f2a26)', justifyContent: 'flex-start', padding: '0 12px', height: 36 }}
-                  icon={<CodeOutlined style={{ color: 'var(--studio-muted, #746b63)' }} />}
-                  onClick={() => handleSend('Review dependencies')}
-                >
-                  Review dependencies
-                </Button>
-                <Button
-                  style={{ backgroundColor: 'transparent', borderColor: 'var(--studio-border, #d8d1c5)', color: 'var(--studio-text, #2f2a26)', justifyContent: 'flex-start', padding: '0 12px', height: 36 }}
-                  icon={<SafetyCertificateOutlined style={{ color: 'var(--studio-muted, #746b63)' }} />}
-                  onClick={() => handleSend('Find security issues')}
-                >
-                  Find security issues
-                </Button>
+                <Button style={{ backgroundColor: 'transparent', borderColor: 'var(--studio-border, #d8d1c5)', color: 'var(--studio-text, #2f2a26)', justifyContent: 'flex-start', padding: '0 12px', height: 36 }} icon={<BulbOutlined style={{ color: 'var(--studio-muted, #746b63)' }} />} onClick={() => handleSend('Explain this file')}>Explain this file</Button>
+                <Button style={{ backgroundColor: 'transparent', borderColor: 'var(--studio-border, #d8d1c5)', color: 'var(--studio-text, #2f2a26)', justifyContent: 'flex-start', padding: '0 12px', height: 36 }} icon={<CodeOutlined style={{ color: 'var(--studio-muted, #746b63)' }} />} onClick={() => handleSend('Review dependencies')}>Review dependencies</Button>
+                <Button style={{ backgroundColor: 'transparent', borderColor: 'var(--studio-border, #d8d1c5)', color: 'var(--studio-text, #2f2a26)', justifyContent: 'flex-start', padding: '0 12px', height: 36 }} icon={<SafetyCertificateOutlined style={{ color: 'var(--studio-muted, #746b63)' }} />} onClick={() => handleSend('Find security issues')}>Find security issues</Button>
               </div>
             </div>
           ) : (
@@ -754,6 +693,8 @@ export default function ChatPanel({
               const isUser = msg.role === 'user';
               const isSystem = msg.role === 'system';
               const isEditing = editingMessage === i;
+              const isLastMessage = i === messages.length - 1;
+              const isRunningHere = agentRunning && isLastMessage;
 
               return (
                 <div key={i} style={{
@@ -770,26 +711,11 @@ export default function ChatPanel({
 
                   {msg.role === 'assistant' ? (
                     <div style={{ width: '100%', overflow: 'hidden' }}>
-                      {/* Resolved context chip */}
-                      {msg.resolvedContext && (
-                        <div style={{ marginBottom: 8 }}>
-                          <Tag
-                            color={msg.resolvedContext.confidence === 'high' ? 'success' : 'default'}
-                            style={{ fontSize: '11px', fontFamily: 'monospace' }}
-                          >
-                            {msg.resolvedContext.file}
-                            {msg.resolvedContext.symbol ? ` › ${msg.resolvedContext.symbol.name}` : ''}
-                          </Tag>
-                        </div>
-                      )}
-
-                      <ThinkingBlock text={msg.thinkingText} live={agentRunning && i === messages.length - 1} />
-
                       {msg.thinkingNotice && (
                         <div style={{ marginBottom: 8, color: '#94613f', fontSize: 11 }}>{msg.thinkingNotice}</div>
                       )}
 
-                      <AgentTimeline activities={msg.activities || []} running={agentRunning && i === messages.length - 1} />
+                      <ThinkingTimeline entries={msg.timeline || []} running={isRunningHere} hasContent={Boolean(msg.content)} />
 
                       {isEditing ? (
                         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -807,9 +733,7 @@ export default function ChatPanel({
 
                       {msg.followUp && !msg.followUp.answered && (
                         <div style={{ marginTop: 10, padding: 12, border: '1px solid var(--studio-border, #c8bfb2)', borderRadius: 8, backgroundColor: 'var(--studio-surface, #fffdf8)' }}>
-                          <Text style={{ color: 'var(--studio-text, #2f2a26)', display: 'block', marginBottom: 10 }}>
-                            {msg.followUp.question}
-                          </Text>
+                          <Text style={{ color: 'var(--studio-text, #2f2a26)', display: 'block', marginBottom: 10 }}>{msg.followUp.question}</Text>
                           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'stretch', gap: 10 }}>
                             {msg.followUp.input_type === 'multiselect' && (msg.followUp.options || []).length > 0 ? (
                               <Checkbox.Group
@@ -833,9 +757,7 @@ export default function ChatPanel({
                                 onPressEnter={() => submitFollowUp(i, msg.followUp)}
                               />
                             )}
-                            <Button type="primary" disabled={agentRunning || !hasFollowUpAnswer(i)} onClick={() => submitFollowUp(i, msg.followUp)}>
-                              Continue
-                            </Button>
+                            <Button type="primary" disabled={agentRunning || !hasFollowUpAnswer(i)} onClick={() => submitFollowUp(i, msg.followUp)}>Continue</Button>
                           </div>
                         </div>
                       )}
@@ -843,7 +765,6 @@ export default function ChatPanel({
                       {msg.followUp?.answered && (
                         <Text style={{ display: 'block', marginTop: 8, color: 'var(--studio-muted, #746b63)', fontSize: 11 }}>Answered: {msg.followUp.answer}</Text>
                       )}
-
                     </div>
                   ) : isEditing ? (
                     <div style={{ minWidth: 260, display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -866,56 +787,32 @@ export default function ChatPanel({
                   )}
 
                   {msg.stopped && <Text style={{ display: 'block', marginTop: 5, color: '#b85c5c', fontSize: 11 }}>Stopped</Text>}
-
                 </div>
               );
-			})
-		  )}
-          {pendingPatches.length > 0 && !agentRunning && (
-            <PatchReview
-              patches={pendingPatches}
-              onApprove={handleApprovePatch}
-              onReject={handleRejectPatch}
-              onApproveAll={handleApproveAll}
-              onRejectAll={handleRejectAll}
-            />
+            })
           )}
-          {agentRunning && messages.length > 0 && messages[messages.length - 1].role === 'user' && (
-            <div style={{ alignSelf: 'flex-start', padding: '0' }}>
-              <Text style={{ fontSize: '13.6px', color: 'var(--studio-muted, #746b63)', fontStyle: 'italic' }}>Agent is thinking...</Text>
-            </div>
+          {pendingPatches.length > 0 && !agentRunning && (
+            <PatchReview patches={pendingPatches} onApprove={handleApprovePatch} onReject={handleRejectPatch} onApproveAll={handleApproveAll} onRejectAll={handleRejectAll} />
+          )}
+          {pendingCommands.length > 0 && !agentRunning && (
+            <CommandReview commands={pendingCommands} onApprove={handleApproveCommand} onReject={handleRejectCommand} onApproveAll={handleApproveAllCommands} onRejectAll={handleRejectAllCommands} />
           )}
           <div ref={messagesEndRef} />
         </div>
 
-        {/* Input Area */}
         <div style={{ padding: 16, borderTop: '1px solid var(--studio-border, #d8d1c5)', display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {/* Context badge */}
           {contextBadgeLabel && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               <Text style={{ fontSize: '11px', color: 'var(--studio-subtle, #91877e)' }}>Context:</Text>
-              <Tag icon={<FileOutlined />} style={{ fontSize: '11px', backgroundColor: 'var(--studio-border, #d8d1c5)', color: 'var(--studio-muted, #746b63)', border: '1px solid var(--studio-border, #c8bfb2)' }}>
-                {contextBadgeLabel}
-              </Tag>
+              <Tag icon={<FileOutlined />} style={{ fontSize: '11px', backgroundColor: 'var(--studio-border, #d8d1c5)', color: 'var(--studio-muted, #746b63)', border: '1px solid var(--studio-border, #c8bfb2)' }}>{contextBadgeLabel}</Tag>
             </div>
           )}
 
-          <Checkbox
-            checked={includeFile}
-            onChange={e => setIncludeFile(e.target.checked)}
-            style={{ color: 'var(--studio-muted, #746b63)', fontSize: '12px' }}
-          >
+          <Checkbox checked={includeFile} onChange={e => setIncludeFile(e.target.checked)} style={{ color: 'var(--studio-muted, #746b63)', fontSize: '12px' }}>
             Include active file content
           </Checkbox>
 
-          <div style={{
-            backgroundColor: 'var(--studio-surface, #fffdf8)',
-            border: '1px solid var(--studio-border, #d8d1c5)',
-            borderRadius: 8,
-            padding: '2px',
-            display: 'flex',
-            flexDirection: 'column'
-          }}>
+          <div style={{ backgroundColor: 'var(--studio-surface, #fffdf8)', border: '1px solid var(--studio-border, #d8d1c5)', borderRadius: 8, padding: '2px', display: 'flex', flexDirection: 'column' }}>
             <TextArea
               ref={inputRef}
               autoSize={{ minRows: 2, maxRows: 6 }}
@@ -928,14 +825,7 @@ export default function ChatPanel({
                   handleSend();
                 }
               }}
-              style={{
-                backgroundColor: 'transparent',
-                border: 'none',
-                boxShadow: 'none',
-                color: 'var(--studio-text, #2f2a26)',
-                resize: 'none',
-                padding: '8px 12px'
-              }}
+              style={{ backgroundColor: 'transparent', border: 'none', boxShadow: 'none', color: 'var(--studio-text, #2f2a26)', resize: 'none', padding: '8px 12px' }}
             />
             <div className="chat-composer-footer">
               <Select
@@ -972,35 +862,19 @@ export default function ChatPanel({
               )}
               <span style={{ flex: 1 }} />
               {agentRunning ? (
-                <Button
-                  danger
-                  type="primary"
-                  shape="circle"
-                  size="small"
-                  title="Stop generation"
-                  aria-label="Stop generation"
-                  icon={<BorderOutlined style={{ fontSize: 10 }} />}
-                  onClick={handleStop}
-                  style={{ width: 26, minWidth: 26, height: 26, padding: 0 }}
-                />
+                <Button danger type="primary" shape="circle" size="small" title="Stop generation" aria-label="Stop generation" icon={<BorderOutlined style={{ fontSize: 10 }} />} onClick={handleStop} style={{ width: 26, minWidth: 26, height: 26, padding: 0 }} />
               ) : (
                 <Button
                   type="primary"
                   icon={<SendOutlined />}
                   onClick={() => handleSend()}
                   disabled={!input.trim()}
-                  style={{
-                    height: 28, width: 28, padding: 0,
-                    backgroundColor: input.trim() ? 'var(--studio-accent, #c15f3c)' : 'var(--studio-border, #d8d1c5)',
-                    borderColor: input.trim() ? 'var(--studio-accent, #c15f3c)' : 'var(--studio-border, #d8d1c5)',
-                    color: input.trim() ? '#ffffff' : 'var(--studio-subtle, #91877e)'
-                  }}
+                  style={{ height: 28, width: 28, padding: 0, backgroundColor: input.trim() ? 'var(--studio-accent, #c15f3c)' : 'var(--studio-border, #d8d1c5)', borderColor: input.trim() ? 'var(--studio-accent, #c15f3c)' : 'var(--studio-border, #d8d1c5)', color: input.trim() ? '#ffffff' : 'var(--studio-subtle, #91877e)' }}
                 />
               )}
             </div>
           </div>
         </div>
-
       </div>
     </ConfigProvider>
   );

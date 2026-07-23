@@ -47,6 +47,14 @@ func (h *ProjectsHandler) HandleCreateProject(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	// Opening a folder that's already registered as a project (e.g. via the
+	// "Open Folder" picker) must reuse that project rather than fail on the
+	// path's UNIQUE constraint — the caller just wants to switch to it.
+	if existing, err := h.db.GetProjectByPath(req.Path); err == nil {
+		json.NewEncoder(w).Encode(map[string]any{"project": existing})
+		return
+	}
+
 	id := db.NewID()
 	project, err := h.db.CreateProject(id, req.Name, req.Path, req.Description)
 	if err != nil {

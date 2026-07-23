@@ -23,6 +23,8 @@ const languageMap = {
  *  - onSymbolChange(symbol | null): called when word-at-cursor changes
  *  - onEdit(file, startLine, endLine): called on model content changes
  *  - onFileOpen(): currently unused placeholder for future tab sync
+ *  - initialCursor: { line, column } — where to place the cursor once this
+ *    file's content has loaded (e.g. restoring position from a deep link)
  */
 export default function EditorPanel({
   filepath,
@@ -32,6 +34,7 @@ export default function EditorPanel({
   onSelectionChange,
   onSymbolChange,
   onEdit,
+  initialCursor,
 }) {
   const [content, setContent] = useState('');
   const [unsaved, setUnsaved] = useState(false);
@@ -96,8 +99,28 @@ export default function EditorPanel({
     }
   }, [aiPreview, filepath]);
 
+  // Freeze whatever cursor a deep link asked for at the moment this file was
+  // opened — captured once per file, ignoring the prop's later changes (which
+  // just track the user's own subsequent cursor movement and must not hijack
+  // their scroll position). Applied from handleEditorMount below, since that
+  // fires once Monaco itself is ready — not tied to the [content] effect,
+  // which can (and does) run before Monaco's own async mount completes.
+  const pendingCursorRef = useRef(null);
+  useEffect(() => {
+    pendingCursorRef.current = initialCursor;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filepath]);
+
   const handleEditorMount = (editor, monaco) => {
     editorRef.current = editor;
+
+    const cursor = pendingCursorRef.current;
+    if (cursor && (cursor.line || cursor.column)) {
+      const line = cursor.line || 1;
+      const column = cursor.column || 1;
+      editor.setPosition({ lineNumber: line, column });
+      editor.revealLineInCenter(line);
+    }
 
     // Wire up global helpers for ChatPanel Diff logic
     // eslint-disable-next-line react-hooks/immutability

@@ -1130,6 +1130,7 @@ func cosine(a, b []float32) float64 {
 	}
 	return dot / (math.Sqrt(aa) * math.Sqrt(bb))
 }
+
 // maxEmbeddingScanRows bounds the worst-case cost of SearchEmbeddings. There is
 // no vector index here — every candidate row is decoded and scored with cosine
 // similarity in application code — so without a cap a very large indexed repo

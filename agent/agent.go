@@ -22,7 +22,7 @@ import (
 
 const assistantSystemPrompt = `You are the coding assistant inside NativeStudio.
 Answer the user in clear natural language, not as JSON. Use the provided tools through native tool calls; never print a tool-call JSON object in the answer.
-Use the active file and editor context when relevant. When the user's request is short or does not name a target (e.g. "explain", "fix this", "refactor", "what does this do"), assume they mean the active file open in the editor and answer about that file — do not ask them to paste code you already have access to; use read_file if you need more of it than is already shown. CRITICAL: Never write code blocks in the chat response. To edit a file, use replace_in_file or apply_patch. To create a file, use create_file. To remove a file, use delete_file. File mutations are staged for the user to approve or reject. Your text response should only explain briefly what you changed and why. If the request is materially ambiguous and choosing incorrectly could change the result, call ask_follow_up directly with one concise question, the appropriate input type, and useful short options. Use multiselect when several answers can apply. Never narrate an instruction such as "Ask the user". If a request depends on unfamiliar or current facts, call search_internet before answering instead of guessing.`
+Use the active file and editor context when relevant. When the user's request is short or does not name a target (e.g. "explain", "fix this", "refactor", "what does this do"), assume they mean the active file open in the editor and answer about that file — do not ask them to paste code you already have access to; use read_file if you need more of it than is already shown. CRITICAL: Never write code blocks in the chat response. To edit a file, use replace_in_file or apply_patch. To create a file, use create_file. To remove a file, use delete_file. File mutations are staged for the user to approve or reject. For installing packages, scaffolding a new project/framework (e.g. a Composer or npm package, "yii2-app-basic", a boilerplate), or running build/test commands, use run_command instead of hand-writing the files those tools would generate yourself — you do not reliably know the exact files a framework installer produces, and guessing produces broken projects. run_command is also staged for approval before it runs. Your text response should only explain briefly what you changed and why. If the request is materially ambiguous and choosing incorrectly could change the result, call ask_follow_up directly with one concise question, the appropriate input type, and useful short options. Use multiselect when several answers can apply. Never narrate an instruction such as "Ask the user". If a request depends on unfamiliar or current facts, call search_internet before answering instead of guessing.`
 
 // Agent orchestrates a multi-step agent run with tool calling.
 type Agent struct {
@@ -31,22 +31,34 @@ type Agent struct {
 	DB        *db.DB
 	EditorSvc *editor.EditorContextService
 	Resolver  *resolver.ReferenceResolver
+	// MaxToolSteps caps how many tool-call iterations a single run may take.
+	// Configurable (config.json's max_agent_tool_steps) rather than a fixed
+	// constant, per-run limits being a required safety control for any tool
+	// that can be called repeatedly (e.g. a narrowing sequence of find_files
+	// calls).
+	MaxToolSteps int
 }
 
-// NewAgent creates an Agent instance with all dependencies.
+// NewAgent creates an Agent instance with all dependencies. maxToolSteps <= 0
+// falls back to DefaultMaxSteps.
 func NewAgent(
 	ollamaURL string,
 	registry *Registry,
 	database *db.DB,
 	editorSvc *editor.EditorContextService,
 	res *resolver.ReferenceResolver,
+	maxToolSteps int,
 ) *Agent {
+	if maxToolSteps <= 0 {
+		maxToolSteps = DefaultMaxSteps
+	}
 	return &Agent{
-		OllamaURL: ollamaURL,
-		Registry:  registry,
-		DB:        database,
-		EditorSvc: editorSvc,
-		Resolver:  res,
+		OllamaURL:    ollamaURL,
+		Registry:     registry,
+		DB:           database,
+		EditorSvc:    editorSvc,
+		Resolver:     res,
+		MaxToolSteps: maxToolSteps,
 	}
 }
 
@@ -75,7 +87,7 @@ func (a *Agent) Run(
 	if !directConversation {
 		emit("agent_start", map[string]any{
 			"run_id":    runID,
-			"max_steps": DefaultMaxSteps,
+			"max_steps": a.MaxToolSteps,
 		})
 	}
 	if think && !supportsNativeThinking(model) {
@@ -252,7 +264,7 @@ func (a *Agent) Run(
 		SessionID:  sessionID,
 		Model:      model,
 		Steps:      0,
-		MaxSteps:   DefaultMaxSteps,
+		MaxSteps:   a.MaxToolSteps,
 		Think:      think,
 		ThinkLevel: thinkLevel,
 		Direct:     directConversation,
@@ -283,6 +295,46 @@ func (a *Agent) Run(
 				}
 			}
 			break
+		}
+	}
+
+	// Small local models sometimes describe an action in prose instead of
+	// actually calling the tool for it — a code block describing a file
+	// change, or (just as often) a plain sentence like "please confirm the
+	// installation" with no run_command call behind it at all. Both are the
+	// same failure: the model narrated instead of acting. Give it exactly
+	// one chance to correct course rather than silently accepting a
+	// response that did nothing. Paused (asked a real clarifying question)
+	// is excluded — that's a legitimate reason to have called no tool.
+	narratedInsteadOfActing := containsCodeBlock(finalContent) || (promptRequestsAction(prompt) && !run.Paused)
+	if !directConversation && run.Steps < run.MaxSteps && narratedInsteadOfActing && !anyToolMessage(messages) {
+		messages = append(messages, OllamaMessage{
+			Role: "user",
+			Content: "You just described an action in your response instead of performing it — the chat response must never contain code blocks or " +
+				"claim a file/command change is staged unless you actually called a tool for it. Do not explain the change in prose. Call create_file, " +
+				"replace_in_file, apply_patch, or delete_file now with the real content, or run_command now with the exact command, to actually do this.",
+		})
+		// Re-enter the same step loop (not a single extra call): the model
+		// may respond to the nudge with a tool call rather than text
+		// immediately, which needs further steps — including possibly more
+		// tool calls — to reach a real final answer, exactly like the main
+		// loop above. run.Step's own MaxSteps check bounds this.
+		for {
+			done, newMessages, err := run.Step(ctx, messages, a.Registry, a.OllamaURL, runEmit)
+			if err != nil {
+				log.Printf("[agent] run %s corrective retry error: %v", runID, err)
+				break
+			}
+			messages = newMessages
+			if done {
+				for i := len(messages) - 1; i >= 0; i-- {
+					if messages[i].Role == "assistant" {
+						finalContent = messages[i].Content
+						break
+					}
+				}
+				break
+			}
 		}
 	}
 
@@ -380,6 +432,16 @@ func anchorPromptToActiveFile(prompt string, state editor.EditorState) string {
 		return prompt // already names the file
 	}
 	return fmt.Sprintf("%s `%s` (the file I currently have open).", trimmed, state.ActiveFile)
+}
+
+// promptRequestsAction matches prompts that ask for something to be done
+// (create a file, install a package, run a build) rather than asked about —
+// used to catch a model that responded with narration ("please confirm the
+// installation...") instead of actually calling create_file/run_command/etc.
+var actionRequestPattern = regexp.MustCompile(`(?i)\b(create|make|add|install|build|generate|write|implement|delete|remove|rename|fix|update|modify|refactor|scaffold|set\s?up|run|execute|initialize|init)\b`)
+
+func promptRequestsAction(prompt string) bool {
+	return actionRequestPattern.MatchString(prompt)
 }
 
 func (a *Agent) generateConversationMetadata(ctx context.Context, model, currentTitle, currentSummary, userPrompt, assistantResponse string) (string, string, error) {
@@ -511,6 +573,13 @@ func isPlaceholderTitle(title string) bool {
 	return normalized == "" || normalized == "new conversation" || normalized == "untitled conversation"
 }
 
+// codingContextFollowers are words that, immediately after a time-ish marker
+// like "current", signal an ordinary coding phrase ("current folder/file/
+// directory/branch/project") rather than a request for current-events
+// information — without this, "install X in the current folder" was
+// (wrongly) triggering a web search.
+var codingContextFollowers = regexp.MustCompile(`(?i)^\s*(folder|file|directory|dir|branch|project|repo|repository|workspace|module|version|state|code|line|selection|tab|working)\b`)
+
 func needsInternetSearch(prompt string) bool {
 	lower := strings.ToLower(prompt)
 	markers := []string{
@@ -518,9 +587,14 @@ func needsInternetSearch(prompt string) bool {
 		"news", "protest", "election", "price", "weather", "this week", "this month", "this year",
 	}
 	for _, marker := range markers {
-		if strings.Contains(lower, marker) {
-			return true
+		index := strings.Index(lower, marker)
+		if index < 0 {
+			continue
 		}
+		if marker == "current " && codingContextFollowers.MatchString(lower[index+len(marker):]) {
+			continue // "current folder/file/..." — not a current-events question
+		}
+		return true
 	}
 	return false
 }
@@ -553,6 +627,26 @@ func currentSearchQuery(prompt string, now time.Time) string {
 		}
 	}
 	return fmt.Sprintf("%s %d", query, now.Year())
+}
+
+// containsCodeBlock reports whether content has a fenced code block — the
+// system prompt forbids these in chat responses, so seeing one is a signal
+// the model wrote out a change instead of calling a file-mutation tool.
+func containsCodeBlock(content string) bool {
+	return strings.Contains(content, "```")
+}
+
+// anyToolMessage reports whether any tool was actually executed during this
+// run. Tool-role messages only ever exist in the in-memory conversation for
+// the current Run() call (only the final assistant text gets persisted), so
+// this reflects this run alone, not prior turns.
+func anyToolMessage(messages []OllamaMessage) bool {
+	for _, m := range messages {
+		if m.Role == "tool" {
+			return true
+		}
+	}
+	return false
 }
 
 func responseIgnoredSuccessfulSearch(content string) bool {
