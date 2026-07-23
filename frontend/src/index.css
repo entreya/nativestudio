@@ -179,6 +179,22 @@ button, input, textarea { font: inherit; }
 .index-events { max-height: 210px; margin-top: 12px; overflow: auto; }
 .index-events .ant-list-item { gap: 10px; padding: 6px 0; }
 
+/* Compact Project Knowledge layout — key info (heading, detected project,
+   index status) stays above the fold; the long detail lists live in tabs
+   instead of a tall stack of cards, so the page no longer scrolls. */
+.knowledge-page.memory-page { padding-top: 28px; }
+.knowledge-topbar { max-width: 1180px; margin: 0 auto 16px; display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; }
+.knowledge-heading .eyebrow { color: var(--claude-accent); font-size: 11px; font-weight: 750; letter-spacing: .14em; }
+.knowledge-heading h2.ant-typography { color: var(--claude-text); font-weight: 600; letter-spacing: -.02em; }
+.knowledge-summary-row { max-width: 1180px; margin: 0 auto 16px; display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 16px; align-items: stretch; }
+.knowledge-summary-row .ant-card { border-color: var(--claude-border); background: var(--claude-surface); }
+.knowledge-stat-inline { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 12px; }
+.knowledge-stat-inline .ant-statistic-title { font-size: 11px; margin-bottom: 0; }
+.knowledge-stat-inline .ant-statistic-content { font-size: 18px; }
+.knowledge-stat-inline .ant-statistic-content-prefix { color: var(--claude-accent); }
+.knowledge-detail { max-width: 1180px; margin: 0 auto; }
+.knowledge-detail .ant-tabs-content { max-height: 46vh; overflow-y: auto; padding-right: 6px; }
+
 @media (max-width: 760px) {
   .claude-navbar { grid-template-columns: auto 1fr; gap: 10px; padding: 0 12px; }
   .claude-nav-folder { display: none; }
@@ -189,6 +205,9 @@ button, input, textarea { font: inherit; }
   .conversation-grid { grid-template-columns: 1fr; }
   .knowledge-stats, .knowledge-grid { grid-template-columns: 1fr; }
   .knowledge-files { grid-column: auto; }
+  .knowledge-topbar { flex-direction: column; align-items: stretch; gap: 12px; }
+  .knowledge-summary-row { grid-template-columns: 1fr; }
+  .knowledge-stat-inline { grid-template-columns: repeat(2, 1fr); }
   .status-right { display: none; }
   .scan-notification { min-width: 0; }
   .scan-progress { width: 70px; }

@@ -11,7 +11,7 @@ import { loadFontSettings, saveFontSettings } from './fontSettings';
 export function AppStateProvider({ children }) {
   const navigate = useNavigate();
 
-  const [themeID, setThemeID] = useState(() => window.localStorage.getItem('nativestudio.theme') || 'linear');
+  const [themeID, setThemeID] = useState(() => window.localStorage.getItem('nativestudio.theme') || 'default');
   const [themeSettingsOpen, setThemeSettingsOpen] = useState(false);
   const [fontSettingsOpen, setFontSettingsOpen] = useState(false);
   const [fontSettings, setFontSettings] = useState(loadFontSettings);

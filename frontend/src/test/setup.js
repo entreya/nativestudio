@@ -11,3 +11,11 @@ class MockEventSource {
   close() {}
 }
 globalThis.EventSource = MockEventSource;
+
+// jsdom has no ResizeObserver; antd components (Tabs, Select, …) require it.
+class MockResizeObserver {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+globalThis.ResizeObserver = MockResizeObserver;

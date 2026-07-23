@@ -125,6 +125,14 @@ export default function EditorPanel({
       editor.revealLineInCenter(line);
     }
 
+    // Coding fonts load asynchronously as web fonts (see index.html). Monaco
+    // measures glyph widths once at mount, so a font arriving after that would
+    // render mismeasured (and ligatures wouldn't kick in) until the next
+    // relayout — remeasure as soon as the browser reports fonts are ready.
+    if (document.fonts?.ready) {
+      document.fonts.ready.then(() => monaco.editor.remeasureFonts());
+    }
+
     // Wire up global helpers for ChatPanel Diff logic
     // eslint-disable-next-line react-hooks/immutability
     window.editor = editor;
