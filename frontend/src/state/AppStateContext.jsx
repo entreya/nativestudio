@@ -6,12 +6,15 @@ import { getStudioTheme, themeVariables } from '../themes';
 import { fileURL } from './fileURL';
 import { folderNameFromPath } from './folderNameFromPath';
 import { AppStateContext } from './context';
+import { loadFontSettings, saveFontSettings } from './fontSettings';
 
 export function AppStateProvider({ children }) {
   const navigate = useNavigate();
 
-  const [themeID, setThemeID] = useState(() => window.localStorage.getItem('nativestudio.theme') || 'default');
+  const [themeID, setThemeID] = useState(() => window.localStorage.getItem('nativestudio.theme') || 'linear');
   const [themeSettingsOpen, setThemeSettingsOpen] = useState(false);
+  const [fontSettingsOpen, setFontSettingsOpen] = useState(false);
+  const [fontSettings, setFontSettings] = useState(loadFontSettings);
   const [workspacePickerMode, setWorkspacePickerMode] = useState(null);
   const [projects, setProjects] = useState([]);
   const [projectsLoaded, setProjectsLoaded] = useState(false);
@@ -58,6 +61,14 @@ export function AppStateProvider({ children }) {
   const selectTheme = id => {
     setThemeID(id);
     window.localStorage.setItem('nativestudio.theme', id);
+  };
+
+  const updateFontSettings = patch => {
+    setFontSettings(prev => {
+      const next = { ...prev, ...patch };
+      saveFontSettings(next);
+      return next;
+    });
   };
 
   useEffect(() => {
@@ -359,6 +370,7 @@ export function AppStateProvider({ children }) {
 
   const value = {
     themeID, themeSettingsOpen, setThemeSettingsOpen, selectTheme,
+    fontSettingsOpen, setFontSettingsOpen, fontSettings, updateFontSettings,
     activeTheme, studioStyle, studioClassName, antTheme,
     workspacePickerMode, setWorkspacePickerMode, handleWorkspacePickerSelect,
     projects, projectsLoaded, activeProject, selectProject, switchToProject,

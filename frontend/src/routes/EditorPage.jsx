@@ -1,9 +1,9 @@
 import React from 'react';
-import { Typography, Button, Tabs, Tooltip, Avatar, Breadcrumb, Space } from 'antd';
+import { Typography, Button, Tabs, Tooltip, Avatar, Breadcrumb, Space, Dropdown } from 'antd';
 import {
   FolderOpenOutlined, FileOutlined, SettingOutlined, SearchOutlined,
   AppstoreOutlined, UserOutlined, BranchesOutlined, PlusOutlined,
-  EllipsisOutlined, CodeOutlined, DatabaseOutlined,
+  EllipsisOutlined, CodeOutlined, DatabaseOutlined, BgColorsOutlined, FontSizeOutlined,
 } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import FileTree from '../components/FileTree';
@@ -13,11 +13,17 @@ import TopNavbar from '../components/TopNavbar';
 import StatusBar from '../components/StatusBar';
 import DragHandle from '../components/DragHandle';
 import ThemeSettingsModal from '../components/ThemeSettingsModal';
+import FontSettingsModal from '../components/FontSettingsModal';
 import { useAppState } from '../state/useAppState';
 import { folderNameFromPath } from '../state/folderNameFromPath';
 import { useProjectRouteSync, useFileRouteSync } from '../hooks/useRouteSync';
 
 const { Text } = Typography;
+
+const settingsMenuItems = [
+  { key: 'theme', icon: <BgColorsOutlined />, label: 'Theme' },
+  { key: 'fonts', icon: <FontSizeOutlined />, label: 'Fonts' },
+];
 
 export default function EditorPage() {
   const navigate = useNavigate();
@@ -27,6 +33,7 @@ export default function EditorPage() {
   const {
     studioStyle, studioClassName, activeTheme,
     themeSettingsOpen, setThemeSettingsOpen, themeID, selectTheme,
+    fontSettingsOpen, setFontSettingsOpen, fontSettings, updateFontSettings,
     activeProject, handleNavigate, handleOpenFile, handleCreateProject,
     layout, toggleLayout,
     sidebarWidth, chatWidth, handleSidebarDrag, handleChatDrag, sidebarStartRef, chatStartRef,
@@ -92,7 +99,21 @@ export default function EditorPage() {
 
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 24, width: '100%', paddingBottom: 8 }}>
             <Tooltip placement="right" title="Settings">
-              <SettingOutlined onClick={() => setThemeSettingsOpen(true)} style={{ fontSize: 24, color: 'var(--studio-subtle, #91877e)', cursor: 'pointer' }} />
+              <Dropdown
+                trigger={['click']}
+                placement="rightBottom"
+                menu={{
+                  items: settingsMenuItems,
+                  onClick: ({ key }) => {
+                    if (key === 'theme') setThemeSettingsOpen(true);
+                    else if (key === 'fonts') setFontSettingsOpen(true);
+                  },
+                }}
+              >
+                <span style={{ display: 'inline-flex', cursor: 'pointer' }}>
+                  <SettingOutlined style={{ fontSize: 24, color: 'var(--studio-subtle, #91877e)' }} />
+                </span>
+              </Dropdown>
             </Tooltip>
             <Avatar icon={<UserOutlined />} size={24} style={{ backgroundColor: 'var(--studio-border, #d8d1c5)', color: 'var(--studio-text, #2f2a26)', cursor: 'pointer' }} />
           </div>
@@ -177,6 +198,7 @@ export default function EditorPage() {
                 filepath={activeTab}
                 darkMode={activeTheme.dark}
                 aiPreview={aiPreview}
+                fontSettings={fontSettings}
                 initialCursor={editorCtx.context.cursor}
                 onCursorChange={updateCursorAndSync}
                 onSelectionChange={editorCtx.updateSelection}
@@ -220,6 +242,7 @@ export default function EditorPage() {
       <StatusBar indexStatus={indexStatus} scanMinimized={scanNotificationMinimized} onScanMinimize={() => setScanNotificationMinimized(true)} onScanExpand={() => setScanNotificationMinimized(false)} />
 
       <ThemeSettingsModal open={themeSettingsOpen} selectedTheme={themeID} onSelect={selectTheme} onClose={() => setThemeSettingsOpen(false)} />
+      <FontSettingsModal open={fontSettingsOpen} settings={fontSettings} onChange={updateFontSettings} onClose={() => setFontSettingsOpen(false)} />
     </div>
   );
 }

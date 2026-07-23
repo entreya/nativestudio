@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import Editor from '@monaco-editor/react';
 import { Typography, theme } from 'antd';
+import { fontFamilyValue, DEFAULT_FONT_SETTINGS } from '../state/fontSettings';
 
 const { Text } = Typography;
 const { useToken } = theme;
@@ -25,6 +26,7 @@ const languageMap = {
  *  - onFileOpen(): currently unused placeholder for future tab sync
  *  - initialCursor: { line, column } — where to place the cursor once this
  *    file's content has loaded (e.g. restoring position from a deep link)
+ *  - fontSettings: { fontFamilyId, fontSize, lineHeight, letterSpacing, ligatures }
  */
 export default function EditorPanel({
   filepath,
@@ -35,6 +37,7 @@ export default function EditorPanel({
   onSymbolChange,
   onEdit,
   initialCursor,
+  fontSettings = DEFAULT_FONT_SETTINGS,
 }) {
   const [content, setContent] = useState('');
   const [unsaved, setUnsaved] = useState(false);
@@ -239,7 +242,14 @@ export default function EditorPanel({
           value={content}
           onChange={onChange}
           onMount={handleEditorMount}
-          options={{ minimap: { enabled: false }, fontSize: 14 }}
+          options={{
+            minimap: { enabled: false },
+            fontFamily: fontFamilyValue(fontSettings.fontFamilyId),
+            fontSize: fontSettings.fontSize,
+            lineHeight: Math.round(fontSettings.fontSize * fontSettings.lineHeight),
+            letterSpacing: fontSettings.letterSpacing,
+            fontLigatures: fontSettings.ligatures,
+          }}
         />
       </div>
     </div>
