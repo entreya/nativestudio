@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
-import { Tree, Typography, Dropdown, Modal, Popover, Input, Button, App as AntApp } from 'antd';
-import { FolderOutlined, FolderOpenOutlined, FileAddOutlined, FolderAddOutlined } from '@ant-design/icons';
+import { Tree, Typography, Dropdown, Popover, Input, Button } from 'antd';
+import { FolderOutlined, FolderOpenOutlined, FileAddOutlined, FolderAddOutlined, PlusSquareOutlined, MinusSquareOutlined, LoadingOutlined } from '@ant-design/icons';
 import { FileTypeIcon } from '../fileIcons';
 
 const { DirectoryTree } = Tree;
@@ -80,9 +80,9 @@ export default function FileTree({ onFileClick, refreshTrigger, onFileRenamed, o
   const [createName, setCreateName] = useState('');
   const [renameRequest, setRenameRequest] = useState(null); // { path, name }
   const [renameName, setRenameName] = useState('');
+  const [deleteRequest, setDeleteRequest] = useState(null); // { path, name, type }
   const [busy, setBusy] = useState(false);
   const [formError, setFormError] = useState('');
-  const { modal, message } = AntApp.useApp();
 
   useEffect(() => {
     let cancelled = false;
@@ -137,7 +137,7 @@ export default function FileTree({ onFileClick, refreshTrigger, onFileRenamed, o
     }
   };
 
-  const openRenameModal = (path, name) => {
+  const openRenamePopover = (path, name) => {
     setFormError('');
     setRenameName(name);
     setRenameRequest({ path, name });
@@ -164,29 +164,31 @@ export default function FileTree({ onFileClick, refreshTrigger, onFileRenamed, o
     }
   };
 
-  const confirmDelete = (path, name, type) => {
-    modal.confirm({
-      title: `Delete ${name}?`,
-      content: type === 'dir' ? 'This folder and everything inside it will be permanently deleted.' : 'This file will be permanently deleted.',
-      okText: 'Delete',
-      okType: 'danger',
-      onOk: async () => {
-        try {
-          await postFileOp('/api/files/delete', { path });
-          onFileDeleted?.(path);
-          setLocalTick(t => t + 1);
-        } catch (err) {
-          message.error(err.message || 'Could not delete this item.');
-        }
-      },
-    });
+  const openDeletePopover = (path, name, type) => {
+    setFormError('');
+    setDeleteRequest({ path, name, type });
+  };
+
+  const submitDelete = async () => {
+    setBusy(true);
+    setFormError('');
+    try {
+      await postFileOp('/api/files/delete', { path: deleteRequest.path });
+      onFileDeleted?.(deleteRequest.path);
+      setDeleteRequest(null);
+      setLocalTick(t => t + 1);
+    } catch (err) {
+      setFormError(err.message || 'Could not delete this item.');
+    } finally {
+      setBusy(false);
+    }
   };
 
   const handleMenuClick = (key, node) => {
     if (key === 'new-file') openCreatePopover(node.key, 'file');
     else if (key === 'new-folder') openCreatePopover(node.key, 'dir');
-    else if (key === 'rename') openRenameModal(node.key, node.title);
-    else if (key === 'delete') confirmDelete(node.key, node.title, node.type);
+    else if (key === 'rename') openRenamePopover(node.key, node.title);
+    else if (key === 'delete') openDeletePopover(node.key, node.title, node.type);
   };
 
   const menuItemsFor = node => node.type === 'dir'
@@ -222,19 +224,66 @@ export default function FileTree({ onFileClick, refreshTrigger, onFileRenamed, o
     </div>
   );
 
+  const renamePopoverContent = (
+    <div style={{ width: 220 }}>
+      <Input
+        autoFocus
+        size="small"
+        value={renameName}
+        onChange={e => setRenameName(e.target.value)}
+        onPressEnter={submitRename}
+      />
+      {formError && <Text type="danger" style={{ display: 'block', marginTop: 6, fontSize: 12 }}>{formError}</Text>}
+      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 6, marginTop: 8 }}>
+        <Button size="small" onClick={() => setRenameRequest(null)}>Cancel</Button>
+        <Button size="small" type="primary" loading={busy} disabled={!renameName.trim()} onClick={submitRename}>Save</Button>
+      </div>
+    </div>
+  );
+
+  const deletePopoverContent = (
+    <div style={{ width: 240 }}>
+      <Text style={{ display: 'block', marginBottom: formError ? 6 : 10 }}>
+        Delete {deleteRequest?.type === 'dir' ? 'folder' : 'file'} "{deleteRequest?.name}"?
+      </Text>
+      {deleteRequest?.type === 'dir' && (
+        <Text type="secondary" style={{ display: 'block', marginBottom: 10, fontSize: 12 }}>
+          This folder and everything inside it will be permanently deleted.
+        </Text>
+      )}
+      {formError && <Text type="danger" style={{ display: 'block', marginBottom: 10, fontSize: 12 }}>{formError}</Text>}
+      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 6 }}>
+        <Button size="small" onClick={() => setDeleteRequest(null)}>Cancel</Button>
+        <Button size="small" danger type="primary" loading={busy} onClick={submitDelete}>Delete</Button>
+      </div>
+    </div>
+  );
+
   const titleRender = node => {
-    // Every directory row doubles as a potential popover anchor — inert
-    // (open=false) for all but the one row a "New File/Folder" context-menu
-    // action was just triggered on, so the popover appears right next to
-    // the folder it's creating inside of rather than a detached modal.
+    // Every row doubles as a potential popover anchor — inert (open=false)
+    // for all but the one row a context-menu action was just triggered on,
+    // so the popover appears right next to the row it applies to rather than
+    // a detached modal. Create only anchors to directories (it creates
+    // *inside* the folder); rename/delete anchor to the exact row clicked.
     const isCreateAnchor = node.type === 'dir' && createRequest?.parentPath === node.key;
+    const isRenameAnchor = renameRequest?.path === node.key;
+    const isDeleteAnchor = deleteRequest?.path === node.key;
+    const content = isCreateAnchor ? createPopoverContent
+      : isRenameAnchor ? renamePopoverContent
+      : isDeleteAnchor ? deletePopoverContent
+      : null;
     return (
       <Popover
-        open={isCreateAnchor}
+        open={isCreateAnchor || isRenameAnchor || isDeleteAnchor}
         trigger={[]}
         placement="rightTop"
-        onOpenChange={open => { if (!open) setCreateRequest(null); }}
-        content={isCreateAnchor ? createPopoverContent : null}
+        onOpenChange={open => {
+          if (open) return;
+          if (isCreateAnchor) setCreateRequest(null);
+          if (isRenameAnchor) setRenameRequest(null);
+          if (isDeleteAnchor) setDeleteRequest(null);
+        }}
+        content={content}
       >
         <Dropdown
           trigger={['contextMenu']}
@@ -293,6 +342,11 @@ export default function FileTree({ onFileClick, refreshTrigger, onFileRenamed, o
           onSelect={onSelect}
           showIcon
           showLine={{ showLeafIcon: false }}
+          switcherIcon={({ expanded, isLeaf, loading }) => {
+            if (loading) return <LoadingOutlined style={{ color: 'var(--studio-accent, #1677ff)' }} />;
+            if (isLeaf) return null;
+            return expanded ? <MinusSquareOutlined style={{ color: 'var(--studio-muted, #746b63)' }} /> : <PlusSquareOutlined style={{ color: 'var(--studio-muted, #746b63)' }} />;
+          }}
           titleRender={titleRender}
           icon={node => node.type === 'file'
             ? <FileTypeIcon filename={node.title || ''} />
@@ -304,23 +358,6 @@ export default function FileTree({ onFileClick, refreshTrigger, onFileRenamed, o
           No files found
         </Text>
       )}
-
-      <Modal
-        title="Rename"
-        open={Boolean(renameRequest)}
-        onCancel={() => setRenameRequest(null)}
-        onOk={submitRename}
-        okButtonProps={{ loading: busy, disabled: !renameName.trim() }}
-        destroyOnHidden
-      >
-        <Input
-          autoFocus
-          value={renameName}
-          onChange={e => setRenameName(e.target.value)}
-          onPressEnter={submitRename}
-        />
-        {formError && <Text type="danger" style={{ display: 'block', marginTop: 8, fontSize: 12 }}>{formError}</Text>}
-      </Modal>
     </div>
   );
 }

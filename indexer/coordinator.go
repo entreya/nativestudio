@@ -2,8 +2,6 @@ package indexer
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -38,6 +36,20 @@ type Coordinator struct {
 	generation                   uint64
 	fileMu                       sync.Mutex
 	enrichmentJobs               chan struct{}
+	// enrichmentWorkspaceID/enrichmentApproved gate the enrichment worker:
+	// scanning always starts automatically, but enrichment (which calls the
+	// AI model) waits for an explicit user confirmation via
+	// ApproveEnrichment before it processes any queued file_enrichment job.
+	// These are deliberately separate from activeWorkspaceID/activeRoot,
+	// which the scan goroutine clears the moment *scanning* finishes —
+	// enrichment is a longer-running, independent goroutine that keeps going
+	// well after that, so gating approval on activeWorkspaceID would (and
+	// initially did) make every approval silently no-op as soon as the scan
+	// portion completed, which is usually well before enrichment even starts.
+	// Reset on every start()/Cancel() so reopening a project with leftover
+	// queued jobs asks again rather than silently resuming.
+	enrichmentWorkspaceID string
+	enrichmentApproved    bool
 }
 
 func (c *Coordinator) Start(workspaceID, root string) {
@@ -63,6 +75,8 @@ func (c *Coordinator) start(workspaceID, root string, force bool) {
 	c.cancel = cancel
 	c.activeWorkspaceID = workspaceID
 	c.activeRoot = root
+	c.enrichmentWorkspaceID = workspaceID
+	c.enrichmentApproved = false
 	c.generation++
 	generation := c.generation
 	c.enrichmentJobs = jobs
@@ -109,7 +123,39 @@ func (c *Coordinator) Cancel() {
 	}
 	c.activeWorkspaceID = ""
 	c.activeRoot = ""
+	c.enrichmentWorkspaceID = ""
+	c.enrichmentApproved = false
 	c.mu.Unlock()
+}
+
+// ApproveEnrichment unblocks the enrichment worker for workspaceID, letting
+// it start (or resume) processing queued file_enrichment jobs. A no-op if
+// workspaceID isn't the currently active workspace (e.g. a stale approval
+// from a project the user has since navigated away from).
+func (c *Coordinator) ApproveEnrichment(workspaceID string) {
+	c.mu.Lock()
+	if c.enrichmentWorkspaceID != workspaceID {
+		c.mu.Unlock()
+		return
+	}
+	c.enrichmentApproved = true
+	jobs := c.enrichmentJobs
+	c.mu.Unlock()
+	if jobs != nil {
+		select {
+		case jobs <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// IsEnrichmentApproved reports whether enrichment has been approved for
+// workspaceID. Used by the status endpoint to report "pending_confirmation"
+// instead of "running" while queued jobs are waiting on user approval.
+func (c *Coordinator) IsEnrichmentApproved(workspaceID string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.enrichmentWorkspaceID == workspaceID && c.enrichmentApproved
 }
 
 func (c *Coordinator) index(ctx context.Context, workspaceID, root string, scanner Scanner) {
@@ -249,39 +295,6 @@ func (c *Coordinator) index(ctx context.Context, workspaceID, root string, scann
 	<-ctx.Done()
 }
 
-func (c *Coordinator) refreshModuleSummaries(ctx context.Context, runID, workspaceID string, summaries []knowledge.FileSummary, onlyModule string) {
-	groups := map[string][]knowledge.FileSummary{}
-	for _, item := range summaries {
-		path := filepath.ToSlash(item.Path)
-		module := "."
-		if strings.Contains(path, "/") {
-			module = strings.Split(path, "/")[0]
-		}
-		if onlyModule == "" || onlyModule == module {
-			groups[module] = append(groups[module], item)
-		}
-	}
-	for module, items := range groups {
-		parts := make([]string, len(items))
-		var hashes strings.Builder
-		for i, item := range items {
-			parts[i] = item.Path + ": " + item.Summary
-			hashes.WriteString(item.ContentHash)
-		}
-		text, err := c.Models.SummarizeModule(ctx, module, parts)
-		if err != nil {
-			c.recordError(ctx, runID, workspaceID, module, "module_summary", err)
-			continue
-		}
-		sum := sha256.Sum256([]byte(hashes.String()))
-		if err := c.DB.SaveModuleSummary(ctx, workspaceID, knowledge.ModuleSummary{ID: db.NewID(), ModulePath: module, Summary: text, SourceHash: hex.EncodeToString(sum[:]), Model: c.SummaryModel, Status: "active"}); err != nil {
-			c.recordError(ctx, runID, workspaceID, module, "module_summary_persist", err)
-			continue
-		}
-		c.Broker.Emit(workspaceID, "summary_created", map[string]any{"summary_type": "module", "path": module})
-	}
-}
-
 func (c *Coordinator) refreshProjectSummary(ctx context.Context, runID, workspaceID, root string, summaries []knowledge.FileSummary) int {
 	modules, _ := c.DB.ModuleSummaries(ctx, workspaceID)
 	parts := make([]string, 0, len(modules))
@@ -302,8 +315,11 @@ func (c *Coordinator) refreshProjectSummary(ctx context.Context, runID, workspac
 		c.recordError(ctx, runID, workspaceID, "", "project_summary", err)
 		return 1
 	}
-	sum := sha256.Sum256([]byte(hashes.String()))
-	if err := c.DB.SaveProjectSummary(ctx, workspaceID, knowledge.ProjectSummary{ID: db.NewID(), Summary: text, SourceHash: hex.EncodeToString(sum[:]), Model: c.SummaryModel, Status: "active"}); err != nil {
+	if err := c.DB.SaveProjectSummary(ctx, workspaceID, knowledge.ProjectSummary{
+		ID: db.NewID(), Summary: text,
+		SourceHash: sha256sum(hashes.String()),
+		Model:      c.SummaryModel, Status: "active",
+	}); err != nil {
 		c.recordError(ctx, runID, workspaceID, "", "project_summary_persist", err)
 		return 1
 	}

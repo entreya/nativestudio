@@ -13,6 +13,14 @@
 frontend/node_modules/
 frontend/dist/
 
+# LoRA training artifacts — large generated/binary output, not source.
+# training/build_dataset.py, training/data/*.jsonl, and the Colab notebook
+# are the actual source and stay tracked.
+training/.venv/
+training/adapters/
+training/adapters_iter100/
+training/fused-model/
+
 # Editor/OS noise
 .DS_Store
 *.swp

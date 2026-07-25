@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import TopNavbar from '../components/TopNavbar';
 import ProjectKnowledgePage from '../components/ProjectKnowledgePage';
 import StatusBar from '../components/StatusBar';
+import IndexActivityWidget from '../components/IndexActivityWidget';
 import { useAppState } from '../state/useAppState';
 import { folderNameFromPath } from '../state/folderNameFromPath';
 import { useProjectRouteSync } from '../hooks/useRouteSync';
@@ -14,7 +15,7 @@ export default function KnowledgePage() {
     studioStyle, studioClassName, activeProject,
     handleNavigate, handleOpenFile, handleCreateProject,
     setIndexStatus, setScanNotificationMinimized,
-    indexStatus, scanNotificationMinimized,
+    indexStatus,
     openFile,
   } = useAppState();
 
@@ -38,7 +39,7 @@ export default function KnowledgePage() {
           }));
         }}
       />
-      <StatusBar indexStatus={indexStatus} scanMinimized={scanNotificationMinimized} onScanMinimize={() => setScanNotificationMinimized(true)} onScanExpand={() => setScanNotificationMinimized(false)} />
+      <StatusBar indexStatus={indexStatus} />
     </div>
   );
 }

@@ -1,5 +1,5 @@
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import ProjectKnowledgePage from './ProjectKnowledgePage';
 
@@ -22,8 +22,13 @@ describe('ProjectKnowledgePage', () => {
 
   it('renders persisted project knowledge and source actions', async () => {
     render(<ProjectKnowledgePage project={{ id: 'p1', name: 'sample', path: '/tmp/sample' }} onOpenFile={vi.fn()} onBack={vi.fn()} />);
+    // "Detected project" summary is shown above the fold (not behind a tab).
     expect(await screen.findByText('Layered service')).toBeInTheDocument();
-    expect(screen.getByText('Starts the service')).toBeInTheDocument();
+    expect(await screen.findByText('sample')).toBeInTheDocument();
+
+    // File summaries now live under the "Files" tab.
+    fireEvent.click(screen.getByRole('tab', { name: /Files/ }));
+    expect(await screen.findByText('Starts the service')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Open source' })).toBeInTheDocument();
     await waitFor(() => expect(globalThis.fetch).toHaveBeenCalledWith('/api/projects/p1/knowledge'));
   });

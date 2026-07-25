@@ -1,6 +1,6 @@
 /* eslint-disable react-hooks/exhaustive-deps -- loaders intentionally follow project/session identity changes, not function recreation */
 import React, { useState, useEffect, useRef } from 'react';
-import { Select, Progress, Checkbox, Radio, Button, Typography, Input, ConfigProvider, Switch, Tag, Popconfirm } from 'antd';
+import { Select, Progress, Checkbox, Radio, Button, Typography, Input, ConfigProvider, Switch, Tag, Popconfirm, BorderBeam, Tooltip } from 'antd';
 import {
   SendOutlined,
   PlusOutlined,
@@ -18,6 +18,7 @@ import {
   BorderOutlined,
   CheckOutlined,
   CloseOutlined,
+  ArrowUpOutlined,
 } from '@ant-design/icons';
 import ThinkingTimeline from './ThinkingTimeline';
 import CodeSnippet from './CodeSnippet';
@@ -26,6 +27,36 @@ import CommandReview from './CommandReview';
 
 const { Text } = Typography;
 const { TextArea } = Input;
+
+// Small local models sometimes disobey the "never print a tool-call JSON
+// object" instruction and narrate the call (or its result) as a fenced code
+// block instead of actually invoking the tool. That JSON is pure noise —
+// the real, correctly-executed call already has its own row in the timeline
+// above — so it's dropped rather than rendered as if it were code the user
+// asked for.
+function isLeakedToolJSON(value) {
+  let parsed;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    return false;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
+  const looksLikeCall = typeof parsed.name === 'string' && parsed.arguments && typeof parsed.arguments === 'object';
+  const looksLikeResult = typeof parsed.ok === 'boolean' && ('staged' in parsed || 'patch_id' in parsed || 'run_id' in parsed || 'operation' in parsed);
+  return looksLikeCall || looksLikeResult;
+}
+
+// The model sometimes writes the leaked JSON bare — not even fenced — as its
+// own line of "prose". Strip any standalone line that's a complete JSON
+// object matching the leaked-call/result shape, leaving the rest of the
+// surrounding text intact.
+function stripLeakedInlineJSON(text) {
+  return text
+    .split('\n')
+    .filter(line => !isLeakedToolJSON(line.trim()))
+    .join('\n');
+}
 
 function MessageContent({ content }) {
   const parts = [];
@@ -39,9 +70,11 @@ function MessageContent({ content }) {
   }
   if (cursor < (content || '').length) parts.push({ type: 'text', value: content.slice(cursor) });
 
-  return parts.map((part, index) => part.type === 'code'
-    ? <CodeSnippet key={index} language={part.language} code={part.value} />
-    : <div key={index} style={{ whiteSpace: 'pre-wrap' }}>{part.value}</div>);
+  return parts.map((part, index) => {
+    if (part.type !== 'code') return <div key={index} style={{ whiteSpace: 'pre-wrap' }}>{stripLeakedInlineJSON(part.value)}</div>;
+    if (isLeakedToolJSON(part.value.trim())) return null;
+    return <CodeSnippet key={index} language={part.language} code={part.value} />;
+  });
 }
 
 function sameWorkspacePath(left, right) {
@@ -76,7 +109,11 @@ export default function ChatPanel({
   requestedSessionId,
   onFilesChanged,
 }) {
+  // models: plain name strings shown in the dropdown.
+  // modelCapMap: name → thinking_capable flag, populated from /api/models.
+  // Keeping them separate avoids spreading objects into Ant Design's <Select>.
   const [models, setModels] = useState([]);
+  const modelCapMapRef = useRef({});
   const [currentModel, setCurrentModel] = useState('');
   const [isThinkingModel, setIsThinkingModel] = useState(false);
   const [thinkMode, setThinkMode] = useState(false);
@@ -99,13 +136,17 @@ export default function ChatPanel({
 
   const [agentRunning, setAgentRunning] = useState(false);
   const [includeFile, setIncludeFile] = useState(true);
+  const [promptFocused, setPromptFocused] = useState(false);
+  const [followUpFocusedIndex, setFollowUpFocusedIndex] = useState(null);
 
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
   const abortControllerRef = useRef(null);
   const streamStateRef = useRef({ assistantText: '', completionChars: 0, thinkingChars: 0 });
 
-  const supportsThinking = (model) => /^(qwen3|deepseek-r1|deepseek-v3\.1|gpt-oss)/i.test(model || '');
+  // Look up thinking capability from the server-provided map.
+  // The backend (agent.SupportsNativeThinking) is the single source of truth.
+  const supportsThinking = (modelName) => modelCapMapRef.current[modelName] ?? false;
 
   useEffect(() => {
     return () => abortControllerRef.current?.abort();
@@ -116,16 +157,26 @@ export default function ChatPanel({
       .then(res => res.json())
       .then(data => {
         if (data.models && data.models.length > 0) {
-          setModels(data.models);
-          const defaultModel = data.models.includes(data.default_model) ? data.default_model : data.models[0];
+          // API returns [{name, thinking_capable}, ...] — build a lookup map
+          // and extract plain name strings for the dropdown.
+          const capMap = {};
+          const names = data.models.map(m => {
+            const name = typeof m === 'string' ? m : m.name;
+            capMap[name] = typeof m === 'object' ? Boolean(m.thinking_capable) : false;
+            return name;
+          });
+          modelCapMapRef.current = capMap;
+          setModels(names);
+          const defaultModel = names.includes(data.default_model) ? data.default_model : names[0];
           setCurrentModel(defaultModel);
-          setIsThinkingModel(supportsThinking(defaultModel));
+          setIsThinkingModel(capMap[defaultModel] ?? false);
         }
       });
   }, []);
 
   const handleModelChange = (m) => {
-    const supported = supportsThinking(m);
+    // m is a plain model name string (Ant Design Select passes value, not the option object)
+    const supported = modelCapMapRef.current[m] ?? false;
     setCurrentModel(m);
     setIsThinkingModel(supported);
     if (!supported) setThinkMode(false);
@@ -272,6 +323,9 @@ export default function ChatPanel({
           session_id: activeSession.id,
           think: thinkMode,
           think_level: thinkLevel,
+          // Always send the full editor context (file path, line, col, selection)
+          // so the AI always knows exactly where the user is — even when
+          // active file content is excluded from the prompt.
           editor_context: editorContext ? { ...editorContext, active_file_content: activeFileContent } : null,
         }),
         signal: controller.signal,
@@ -604,23 +658,40 @@ export default function ChatPanel({
     }}>
       <div style={{ display: 'flex', flexDirection: 'column', height: '100%', width: '100%', backgroundColor: 'var(--studio-bg, #f7f4ed)' }}>
 
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 16px', borderBottom: '1px solid var(--studio-border, #d8d1c5)' }}>
-          <button
-            type="button"
-            onClick={() => setSessionsOpen(open => !open)}
-            title="Switch conversation"
-            style={{ minWidth: 0, maxWidth: 'calc(100% - 36px)', padding: 0, display: 'flex', alignItems: 'center', gap: 8, color: 'var(--studio-text, #2f2a26)', border: 0, background: 'transparent', cursor: 'pointer', textAlign: 'left' }}
-          >
-            <StarFilled style={{ fontSize: 16, color: 'var(--studio-accent, #c15f3c)' }} />
-            <Text strong ellipsis style={{ minWidth: 0, color: 'var(--studio-text, #2f2a26)', fontSize: '14px' }}>
-              {activeSession?.title || 'New Conversation'}
-            </Text>
-            <DownOutlined style={{ flexShrink: 0, color: 'var(--studio-subtle, #91877e)', fontSize: 10 }} />
-          </button>
-          <Button type="text" icon={<PlusOutlined style={{ color: 'var(--studio-muted, #746b63)' }} />} size="small" onClick={handleNewSession} />
+        <div style={{ position: 'relative', borderBottom: '1px solid var(--studio-border, #d8d1c5)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, padding: '6px 12px' }}>
+            <button
+              type="button"
+              onClick={() => setSessionsOpen(open => !open)}
+              title="Switch conversation"
+              style={{ minWidth: 0, flex: 1, padding: 0, display: 'flex', alignItems: 'center', gap: 6, color: 'var(--studio-text, #2f2a26)', border: 0, background: 'transparent', cursor: 'pointer', textAlign: 'left' }}
+            >
+              <StarFilled style={{ flexShrink: 0, fontSize: 12, color: 'var(--studio-accent, #c15f3c)' }} />
+              <Text strong ellipsis style={{ minWidth: 0, color: 'var(--studio-text, #2f2a26)', fontSize: '12px' }}>
+                {activeSession?.title || 'New Conversation'}
+              </Text>
+              <DownOutlined style={{ flexShrink: 0, color: 'var(--studio-subtle, #91877e)', fontSize: 8 }} />
+            </button>
+            <Tooltip title={`Context used: ${(contextData.tokensUsed || 0).toLocaleString()} / ${(contextData.tokensTotal || 0).toLocaleString()} tokens${(agentRunning || liveUsage.prompt > 0 || liveUsage.completion > 0) ? ` · this turn +${liveUsage.prompt.toLocaleString()} in / ${liveUsage.completion.toLocaleString()} out` : ''}`}>
+              <span style={{
+                flexShrink: 0, fontSize: 9, fontWeight: 700, padding: '1px 6px', borderRadius: 8, lineHeight: '14px',
+                color: contextData.pct > 80 ? '#b85c5c' : contextData.pct > 50 ? '#c69455' : '#6b8f71',
+                backgroundColor: contextData.pct > 80 ? 'rgba(184,92,92,0.12)' : contextData.pct > 50 ? 'rgba(198,148,85,0.12)' : 'rgba(107,143,113,0.12)',
+              }}>
+                {contextData.pct}%
+              </span>
+            </Tooltip>
+            <Button type="text" icon={<PlusOutlined style={{ fontSize: 11, color: 'var(--studio-muted, #746b63)' }} />} size="small" style={{ width: 22, height: 22, minWidth: 22 }} onClick={handleNewSession} title="New conversation" />
+          </div>
+          <div style={{ position: 'absolute', left: 0, right: 0, bottom: -1, height: 1.5, backgroundColor: 'var(--studio-border, #d8d1c5)' }}>
+            <div style={{
+              height: '100%', width: `${Math.min(contextData.pct, 100)}%`, transition: 'width 0.3s ease',
+              backgroundColor: contextData.pct > 80 ? '#b85c5c' : contextData.pct > 50 ? '#c69455' : '#6b8f71',
+            }} />
+          </div>
         </div>
 
-        <div style={{ padding: '12px 16px' }}>
+        <div style={{ padding: sessionsOpen ? '10px 16px 0' : '0 16px' }}>
           {sessionsOpen && (
             <div style={{ backgroundColor: 'var(--studio-surface, #fffdf8)', border: '1px solid var(--studio-border, #d8d1c5)', borderRadius: 6, marginBottom: 16, maxHeight: 150, overflowY: 'auto' }}>
               {sessions.map(s => (
@@ -651,27 +722,6 @@ export default function ChatPanel({
               ))}
             </div>
           )}
-
-          <div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-              <Text style={{ fontSize: '11px', color: 'var(--studio-subtle, #91877e)', letterSpacing: 1, fontWeight: 600 }}>CONTEXT WINDOW</Text>
-              <div style={{ backgroundColor: 'var(--studio-surface, #fffdf8)', border: '1px solid var(--studio-border, #d8d1c5)', padding: '2px 8px', borderRadius: 12, fontSize: '10px', color: '#6b8f71', fontWeight: 600 }}>
-                {contextData.pct}% · {(contextData.tokensUsed || 0).toLocaleString()} / {(contextData.tokensTotal || 0).toLocaleString()}
-              </div>
-            </div>
-            <Progress
-              percent={Math.min(contextData.pct, 100)}
-              showInfo={false}
-              strokeColor={contextData.pct > 80 ? '#b85c5c' : contextData.pct > 50 ? '#c69455' : '#6b8f71'}
-              trailColor="var(--studio-border, #d8d1c5)"
-              size="small"
-            />
-            {(agentRunning || liveUsage.prompt > 0 || liveUsage.completion > 0) && (
-              <Text style={{ display: 'block', marginTop: 4, color: 'var(--studio-muted, #746b63)', fontSize: 10 }}>
-                Current request: {liveUsage.prompt.toLocaleString()} input + {liveUsage.completion.toLocaleString()} output tokens
-              </Text>
-            )}
-          </div>
         </div>
 
         <div style={{ flexGrow: 1, overflowY: 'auto', padding: 16, display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -698,16 +748,33 @@ export default function ChatPanel({
 
               return (
                 <div key={i} style={{
-                  alignSelf: isUser ? 'flex-end' : isSystem ? 'center' : 'flex-start',
-                  backgroundColor: isUser ? 'var(--studio-border, #d8d1c5)' : 'transparent',
-                  color: isSystem ? 'var(--studio-subtle, #91877e)' : 'var(--studio-text, #2f2a26)',
-                  padding: isSystem ? 0 : isUser ? '10px 14px' : '0',
-                  borderRadius: 12,
-                  maxWidth: '90%',
-                  width: msg.role === 'assistant' ? '100%' : 'auto',
-                  fontStyle: isSystem ? 'italic' : 'normal',
-                  fontSize: isSystem ? '12px' : '13.6px',
+                  display: 'flex',
+                  gap: 16,
+                  alignSelf: 'stretch',
+                  position: 'relative'
                 }}>
+                  {/* Timeline Gutter */}
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: 20, flexShrink: 0, position: 'relative' }}>
+                    {/* The Dot */}
+                    <div style={{
+                      width: 10, height: 10, borderRadius: '50%', flexShrink: 0, marginTop: 4, zIndex: 1,
+                      backgroundColor: isUser ? 'var(--studio-muted, #9b9085)' : isSystem ? 'var(--studio-border, #d8d1c5)' : 'var(--studio-accent, #c15f3c)',
+                      animation: (msg.role === 'assistant' && isRunningHere) ? 'ai-pulse 1.5s infinite ease-in-out' : 'none'
+                    }} />
+                    
+                    {/* Faded Vertical Line */}
+                    {!isLastMessage && <div style={{ position: 'absolute', top: 20, bottom: -16, width: 2, backgroundColor: 'var(--studio-border, #e2dcd4)', opacity: 0.4, zIndex: 0 }} />}
+                  </div>
+
+                  {/* Message Content */}
+                  <div style={{
+                     flexGrow: 1, minWidth: 0, paddingBottom: 16,
+                     color: isSystem ? 'var(--studio-subtle, #91877e)' : 'var(--studio-text, #2f2a26)',
+                     fontStyle: isSystem ? 'italic' : 'normal',
+                  }}>
+                    <Text style={{ fontWeight: 600, display: 'block', marginBottom: 4, color: 'var(--studio-muted, #746b63)', fontSize: 12 }}>
+                      {isUser ? 'You' : isSystem ? 'System' : 'Assistant'}
+                    </Text>
 
                   {msg.role === 'assistant' ? (
                     <div style={{ width: '100%', overflow: 'hidden' }}>
@@ -728,6 +795,9 @@ export default function ChatPanel({
                       ) : msg.content && (
                         <div style={{ whiteSpace: 'pre-wrap', fontSize: '13.6px', lineHeight: 1.5, color: 'var(--studio-text, #2f2a26)' }}>
                           <MessageContent content={msg.content} />
+                          {isRunningHere && !msg.timeline?.some(e => e.status === 'running') && (
+                            <span style={{ display: 'inline-block', width: '2px', height: '1em', backgroundColor: 'var(--studio-accent, #c15f3c)', marginLeft: 1, verticalAlign: 'text-bottom', animation: 'blink 1s step-end infinite' }} aria-hidden="true" />
+                          )}
                         </div>
                       )}
 
@@ -750,12 +820,18 @@ export default function ChatPanel({
                                 options={msg.followUp.options.map(option => ({ value: option, label: option }))}
                               />
                             ) : (
-                              <Input
-                                placeholder="Type your answer"
-                                value={followUpAnswers[i] || ''}
-                                onChange={event => setFollowUpAnswers(prev => ({ ...prev, [i]: event.target.value }))}
-                                onPressEnter={() => submitFollowUp(i, msg.followUp)}
-                              />
+                              <BorderBeam color="var(--studio-accent, #c15f3c)" style={{ opacity: followUpFocusedIndex === i ? 1 : 0, transition: 'opacity 0.25s ease' }}>
+                                <div style={{ position: 'relative' }}>
+                                  <Input
+                                    placeholder="Type your answer"
+                                    value={followUpAnswers[i] || ''}
+                                    onChange={event => setFollowUpAnswers(prev => ({ ...prev, [i]: event.target.value }))}
+                                    onPressEnter={() => submitFollowUp(i, msg.followUp)}
+                                    onFocus={() => setFollowUpFocusedIndex(i)}
+                                    onBlur={() => setFollowUpFocusedIndex(current => current === i ? null : current)}
+                                  />
+                                </div>
+                              </BorderBeam>
                             )}
                             <Button type="primary" disabled={agentRunning || !hasFollowUpAnswer(i)} onClick={() => submitFollowUp(i, msg.followUp)}>Continue</Button>
                           </div>
@@ -779,7 +855,7 @@ export default function ChatPanel({
                   )}
 
                   {!isSystem && msg.content && !isEditing && (
-                    <div style={{ display: 'flex', justifyContent: isUser ? 'flex-end' : 'flex-start', gap: 2, marginTop: 5 }}>
+                    <div style={{ display: 'flex', justifyContent: 'flex-start', gap: 2, marginTop: 5 }}>
                       <Button type="text" size="small" title="Edit" aria-label="Edit message" icon={<EditOutlined />} onClick={() => { setEditingMessage(i); setEditDraft(msg.content); }} />
                       <Button type="text" size="small" title="Copy" aria-label="Copy message" icon={<CopyOutlined />} onClick={() => handleCopy(msg.content)} />
                       <Button type="text" size="small" title="Insert into prompt" aria-label="Insert into prompt" icon={<RedoOutlined />} onClick={() => handleReinsert(msg.content)} />
@@ -787,6 +863,7 @@ export default function ChatPanel({
                   )}
 
                   {msg.stopped && <Text style={{ display: 'block', marginTop: 5, color: '#b85c5c', fontSize: 11 }}>Stopped</Text>}
+                  </div>
                 </div>
               );
             })
@@ -800,80 +877,75 @@ export default function ChatPanel({
           <div ref={messagesEndRef} />
         </div>
 
-        <div style={{ padding: 16, borderTop: '1px solid var(--studio-border, #d8d1c5)', display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {contextBadgeLabel && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <Text style={{ fontSize: '11px', color: 'var(--studio-subtle, #91877e)' }}>Context:</Text>
-              <Tag icon={<FileOutlined />} style={{ fontSize: '11px', backgroundColor: 'var(--studio-border, #d8d1c5)', color: 'var(--studio-muted, #746b63)', border: '1px solid var(--studio-border, #c8bfb2)' }}>{contextBadgeLabel}</Tag>
-            </div>
-          )}
+        <div style={{ padding: '16px 20px', borderTop: '1px solid var(--studio-border, #d8d1c5)', display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <BorderBeam color="var(--studio-accent, #c15f3c)" style={{ opacity: promptFocused ? 1 : 0, transition: 'opacity 0.25s ease' }}>
+          <div style={{ position: 'relative', backgroundColor: 'var(--studio-surface, #fffdf8)', border: '1px solid var(--studio-border, #d8d1c5)', borderRadius: 'var(--studio-radius, 8px)', padding: '4px', display: 'flex', flexDirection: 'column', boxShadow: '0 4px 16px rgba(0,0,0,0.04)' }}>
 
-          <Checkbox checked={includeFile} onChange={e => setIncludeFile(e.target.checked)} style={{ color: 'var(--studio-muted, #746b63)', fontSize: '12px' }}>
-            Include active file content
-          </Checkbox>
+            {includeFile && contextBadgeLabel && (
+               <div style={{ padding: '8px 16px 0 16px', display: 'flex', alignItems: 'center', gap: 6, fontSize: '11px', color: 'var(--studio-muted, #746b63)' }}>
+                 <FileOutlined />
+                 <span>Current file <strong>{contextBadgeLabel}</strong> will be sent in context</span>
+                 <CloseOutlined style={{ cursor: 'pointer', padding: 4 }} onClick={() => setIncludeFile(false)} title="Detach file" />
+               </div>
+            )}
 
-          <div style={{ backgroundColor: 'var(--studio-surface, #fffdf8)', border: '1px solid var(--studio-border, #d8d1c5)', borderRadius: 8, padding: '2px', display: 'flex', flexDirection: 'column' }}>
             <TextArea
               ref={inputRef}
-              autoSize={{ minRows: 2, maxRows: 6 }}
-              placeholder="Message AI..."
+              autoSize={{ minRows: 1, maxRows: 6 }}
+              placeholder="Describe your task or prompt..."
               value={input}
               onChange={e => setInput(e.target.value)}
+              onFocus={() => setPromptFocused(true)}
+              onBlur={() => setPromptFocused(false)}
               onKeyDown={e => {
                 if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
                   e.preventDefault();
                   handleSend();
                 }
               }}
-              style={{ backgroundColor: 'transparent', border: 'none', boxShadow: 'none', color: 'var(--studio-text, #2f2a26)', resize: 'none', padding: '8px 12px' }}
+              style={{ backgroundColor: 'transparent', border: 'none', boxShadow: 'none', color: 'var(--studio-text, #2f2a26)', resize: 'none', padding: '12px 16px 8px 16px', fontSize: 14 }}
             />
-            <div className="chat-composer-footer">
+            
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 8px 8px 8px' }}>
+              <Button icon={<PlusOutlined />} shape="circle" style={{ width: 32, height: 32, minWidth: 32, display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: 'var(--studio-surface, #fff)', border: '1px solid var(--studio-border, #e2dcd4)' }} />
+              
+              {!includeFile && contextBadgeLabel && (
+                <Button type="text" size="small" icon={<FileOutlined />} onClick={() => setIncludeFile(true)} style={{ fontSize: 12, color: 'var(--studio-muted, #746b63)', padding: '0 8px' }}>
+                  Include active file
+                </Button>
+              )}
+
+              <span style={{ flex: 1 }} />
+
               <Select
-                className="chat-model-selector"
                 variant="borderless"
-                size="small"
                 value={currentModel || undefined}
                 placeholder="Model"
                 onChange={handleModelChange}
                 popupMatchSelectWidth={240}
-                style={{ minWidth: 0, fontSize: 11 }}
-                options={models.map(model => ({ value: model, label: model }))}
+                style={{ minWidth: 0, fontSize: 13, fontWeight: 500 }}
+                options={models.map(name => ({ value: name, label: name }))}
               />
-              <span style={{ width: 1, height: 18, background: 'var(--studio-border, #e4ddd2)' }} />
-              <Text style={{ fontSize: 10, color: 'var(--studio-muted, #746b63)' }}>Think</Text>
-              <Switch size="small" checked={thinkMode} disabled={!isThinkingModel} onChange={setThinkMode} />
-              <Select
-                variant="borderless"
-                size="small"
-                value={thinkLevel}
-                disabled={!thinkMode || !isThinkingModel}
-                onChange={setThinkLevel}
-                style={{ width: 82, fontSize: 11 }}
-                options={[
-                  { value: 'light', label: 'Light' },
-                  { value: 'medium', label: 'Medium' },
-                  { value: 'high', label: 'High' },
-                  { value: 'extra', label: 'Extra' },
-                  { value: 'supreme', label: 'Supreme' },
-                ]}
-              />
-              {!isThinkingModel && (
-                <Text className="thinking-unsupported" title="Thinking mode is unavailable for this model; requests use normal mode.">unsupported</Text>
+              
+              {isThinkingModel && (
+                <Switch size="small" checked={thinkMode} onChange={setThinkMode} title="Think Mode" style={{ marginRight: 4 }} />
               )}
-              <span style={{ flex: 1 }} />
+
               {agentRunning ? (
-                <Button danger type="primary" shape="circle" size="small" title="Stop generation" aria-label="Stop generation" icon={<BorderOutlined style={{ fontSize: 10 }} />} onClick={handleStop} style={{ width: 26, minWidth: 26, height: 26, padding: 0 }} />
+                <Button danger type="primary" shape="circle" title="Stop generation" aria-label="Stop generation" icon={<CloseOutlined style={{ fontSize: 14 }} />} onClick={handleStop} style={{ width: 34, minWidth: 34, height: 34, display: 'flex', alignItems: 'center', justifyContent: 'center' }} />
               ) : (
                 <Button
                   type="primary"
-                  icon={<SendOutlined />}
+                  shape="circle"
+                  icon={<ArrowUpOutlined style={{ fontSize: 16 }} />}
                   onClick={() => handleSend()}
                   disabled={!input.trim()}
-                  style={{ height: 28, width: 28, padding: 0, backgroundColor: input.trim() ? 'var(--studio-accent, #c15f3c)' : 'var(--studio-border, #d8d1c5)', borderColor: input.trim() ? 'var(--studio-accent, #c15f3c)' : 'var(--studio-border, #d8d1c5)', color: input.trim() ? '#ffffff' : 'var(--studio-subtle, #91877e)' }}
+                  style={{ width: 34, minWidth: 34, height: 34, display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: input.trim() ? 'var(--studio-text, #2f2a26)' : 'var(--studio-panel, #e2dcd4)', borderColor: 'transparent', color: input.trim() ? 'var(--studio-bg, #fff)' : 'var(--studio-subtle, #91877e)' }}
                 />
               )}
             </div>
           </div>
+          </BorderBeam>
         </div>
       </div>
     </ConfigProvider>

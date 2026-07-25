@@ -3,19 +3,20 @@
   "port": 8080,
   "ollama_url": "http://localhost:11434",
   "db_path": "./data/nativestudio.db",
-  "default_model": "qwen2.5-coder:1.5b",
-  "chat_model": "qwen2.5-coder:1.5b",
-  "summary_model": "qwen2.5-coder:1.5b",
+  "default_model": "nativestudio:coder",
+  "chat_model": "nativestudio:coder",
+  "summary_model": "nativestudio:coder",
   "embedding_model": "nomic-embed-text",
   "index_batch_size": 10,
   "maximum_file_size_bytes": 1048576,
   "ollama_concurrency": 2,
+  "embedding_concurrency": 4,
   "max_agent_tool_steps": 15,
   "context": {
     "yellow_threshold": 0.6,
     "red_threshold": 0.8,
     "keep_recent_messages": 10,
-    "summarize_using_model": "qwen2.5-coder:1.5b"
+    "summarize_using_model": "nativestudio:coder"
   },
   "filesystem": {
     "root_dir": "./workspace",

@@ -6,12 +6,34 @@ import { getStudioTheme, themeVariables } from '../themes';
 import { fileURL } from './fileURL';
 import { folderNameFromPath } from './folderNameFromPath';
 import { AppStateContext } from './context';
+import { loadFontSettings, saveFontSettings, DEFAULT_FONT_SETTINGS } from './fontSettings';
+
+// --- Editor Settings ---
+const DEFAULT_EDITOR_SETTINGS = {
+  minimap: true,
+  wordWrap: 'off',
+  smoothScrolling: true,
+  cursorBlinking: 'smooth',
+  renderLineHighlight: 'all',
+  renderWhitespace: 'none',
+  autoClosingBrackets: 'always', // 'always', 'languageDefined', 'beforeWhitespace', 'never'
+  formatOnType: true,
+  codeLens: true,
+  bracketPairColorization: true,
+  linkedEditing: true,
+  matchBrackets: 'always', // 'always', 'never', 'near'
+};
 
 export function AppStateProvider({ children }) {
   const navigate = useNavigate();
 
-  const [themeID, setThemeID] = useState(() => window.localStorage.getItem('nativestudio.theme') || 'default');
+  const [themeID, setThemeID] = useState('default');
   const [themeSettingsOpen, setThemeSettingsOpen] = useState(false);
+  const [fontSettingsOpen, setFontSettingsOpen] = useState(false);
+  const [fontSettings, setFontSettings] = useState(DEFAULT_FONT_SETTINGS);
+  const [editorSettings, setEditorSettings] = useState(DEFAULT_EDITOR_SETTINGS);
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
+
   const [workspacePickerMode, setWorkspacePickerMode] = useState(null);
   const [projects, setProjects] = useState([]);
   const [projectsLoaded, setProjectsLoaded] = useState(false);
@@ -19,8 +41,14 @@ export function AppStateProvider({ children }) {
   const [requestedSessionId, setRequestedSessionId] = useState('');
   const [aiPreview, setAiPreview] = useState(null);
   const [layout, setLayout] = useState({ folders: true, code: true, ai: true });
-  const [indexStatus, setIndexStatus] = useState({ status: 'idle', processed: 0, total: 0, skipped: 0, errors: 0 });
+  const [indexStatus, setIndexStatus] = useState({
+    status: 'idle', processed: 0, total: 0, skipped: 0, errors: 0,
+    enrichmentStatus: 'idle', enrichmentRemaining: 0, enrichmentPath: '',
+    enrichmentEmbedded: 0, enrichmentSummaries: 0, enrichmentDurationMs: 0,
+  });
   const [scanNotificationMinimized, setScanNotificationMinimized] = useState(false);
+  // Per-file timing accumulator — key: path, value: start timestamp ms
+  const enrichStartTimes = useRef({});
 
   const editorCtx = useEditorContext();
 
@@ -55,9 +83,51 @@ export function AppStateProvider({ children }) {
     },
   };
 
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/settings')
+      .then(r => r.json())
+      .then(data => {
+        if (cancelled) return;
+        if (data.themeID) setThemeID(data.themeID);
+        if (data.fontSettings) setFontSettings({ ...DEFAULT_FONT_SETTINGS, ...data.fontSettings });
+        if (data.editorSettings) setEditorSettings({ ...DEFAULT_EDITOR_SETTINGS, ...data.editorSettings });
+        setSettingsLoaded(true);
+      })
+      .catch(err => {
+        console.error('Failed to load settings:', err);
+        if (!cancelled) setSettingsLoaded(true);
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  const saveSettingsToAPI = (theme, font, editor) => {
+    fetch('/api/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ themeID: theme, fontSettings: font, editorSettings: editor })
+    }).catch(console.error);
+  };
+
   const selectTheme = id => {
     setThemeID(id);
-    window.localStorage.setItem('nativestudio.theme', id);
+    saveSettingsToAPI(id, fontSettings, editorSettings);
+  };
+
+  const updateFontSettings = patch => {
+    setFontSettings(prev => {
+      const next = { ...prev, ...patch };
+      saveSettingsToAPI(themeID, next, editorSettings);
+      return next;
+    });
+  };
+
+  const updateEditorSettings = (updates) => {
+    setEditorSettings(prev => {
+      const next = { ...prev, ...updates };
+      saveSettingsToAPI(themeID, fontSettings, next);
+      return next;
+    });
   };
 
   useEffect(() => {
@@ -106,8 +176,9 @@ export function AppStateProvider({ children }) {
         const update = JSON.parse(event.data);
         const data = update.data || {};
         if (update.type === 'knowledge_reset') {
-          setIndexStatus({ status: 'scanning', processed: 0, total: 0, skipped: 0, errors: 0 });
+          setIndexStatus({ status: 'scanning', processed: 0, total: 0, skipped: 0, errors: 0, enrichmentStatus: 'idle', enrichmentRemaining: 0, enrichmentPath: '', enrichmentEmbedded: 0, enrichmentSummaries: 0, enrichmentDurationMs: 0 });
           setScanNotificationMinimized(false);
+          enrichStartTimes.current = {};
         } else if (update.type === 'index_started' || update.type === 'index_progress') {
           setIndexStatus(current => ({ ...current, ...data, status: 'running' }));
           if (update.type === 'index_started' && (data.total || 0) > 1) setScanNotificationMinimized(false);
@@ -115,12 +186,30 @@ export function AppStateProvider({ children }) {
           setIndexStatus(current => ({ ...current, ...data, status: data.errors ? 'completed_with_errors' : 'completed' }));
         } else if (update.type === 'enrichment_queued') {
           setIndexStatus(current => ({ ...current, enrichmentStatus: 'queued', enrichmentRemaining: data.remaining || 0 }));
-        } else if (update.type === 'enrichment_started' || update.type === 'enrichment_progress' || update.type === 'enrichment_aggregating') {
+        } else if (update.type === 'enrichment_started') {
+          if (data.path) enrichStartTimes.current[data.path] = Date.now();
           setIndexStatus(current => ({ ...current, enrichmentStatus: 'running', enrichmentRemaining: data.remaining || 0, enrichmentPath: data.path || '' }));
+        } else if (update.type === 'enrichment_progress') {
+          // Accumulate duration from per-file timing
+          const durationMs = data.duration_ms || 0;
+          if (data.path) delete enrichStartTimes.current[data.path];
+          setIndexStatus(current => ({ ...current, enrichmentStatus: 'running', enrichmentRemaining: data.remaining || 0, enrichmentPath: data.path || '', enrichmentDurationMs: (current.enrichmentDurationMs || 0) + durationMs }));
+        } else if (update.type === 'enrichment_aggregating') {
+          setIndexStatus(current => ({ ...current, enrichmentStatus: 'aggregating', enrichmentRemaining: 0, enrichmentPath: '' }));
         } else if (update.type === 'enrichment_completed') {
-          setIndexStatus(current => ({ ...current, enrichmentStatus: 'completed', enrichmentRemaining: 0, enrichmentPath: '' }));
+          setIndexStatus(current => ({ ...current, enrichmentStatus: 'done', enrichmentRemaining: 0, enrichmentPath: '' }));
+          enrichStartTimes.current = {};
+        } else if (update.type === 'embedding_created') {
+          setIndexStatus(current => ({ ...current, enrichmentEmbedded: (current.enrichmentEmbedded || 0) + (data.chunks || 1) }));
+        } else if (update.type === 'summary_created') {
+          setIndexStatus(current => ({ ...current, enrichmentSummaries: (current.enrichmentSummaries || 0) + 1 }));
         } else if (update.type === 'index_cancelled') {
           setIndexStatus(current => ({ ...current, ...data, status: 'cancelled' }));
+        } else if (update.type === 'enrichment_cancelled') {
+          setIndexStatus(current => ({ ...current, enrichmentStatus: 'cancelled', enrichmentRemaining: 0, enrichmentPath: '' }));
+          enrichStartTimes.current = {};
+        } else if (update.type === 'enrichment_pending_confirmation') {
+          setIndexStatus(current => ({ ...current, enrichmentStatus: 'pending_confirmation', enrichmentRemaining: data.remaining || 0 }));
         } else if (update.type === 'index_error' && !data.path && !data.stage) {
           setIndexStatus(current => ({ ...current, ...data, status: 'failed' }));
         }
@@ -155,20 +244,35 @@ export function AppStateProvider({ children }) {
     } catch (e) { console.error(e); }
   }
 
-  // selectProject + navigate to the project's base URL — use this for any
-  // user-initiated project switch (as opposed to the route-sync hook, which
-  // calls selectProject directly since the URL is already where it should be).
   const switchToProject = useCallback(async (proj) => {
     await selectProject(proj);
     navigate(`/projects/${proj.id}`);
   }, [navigate]);
 
+  // Stops both the code-index scan and the enrichment loop (they share one
+  // cancellation context server-side) — e.g. a large/slow re-index the user
+  // wants to abort, or enrichment they don't want to wait through right now.
+  const stopIndexing = useCallback(async () => {
+    if (!activeProject) return;
+    try {
+      await fetch(`/api/projects/${activeProject.id}/index/stop`, { method: 'POST' });
+    } catch (e) { console.error(e); }
+  }, [activeProject]);
+
+  // Enrichment calls the AI model on every file — scanning starts on its own,
+  // but enrichment waits here for the user to explicitly say go, rather than
+  // silently burning tokens/CPU the moment a project is opened.
+  const approveEnrichment = useCallback(async () => {
+    if (!activeProject) return;
+    try {
+      await fetch(`/api/projects/${activeProject.id}/knowledge/enrichment/approve`, { method: 'POST' });
+    } catch (e) { console.error(e); }
+  }, [activeProject]);
+
   const handleCreateProject = () => setWorkspacePickerMode('folder');
   const handleOpenFile = () => setWorkspacePickerMode('file');
 
   const createProjectFromPath = async path => {
-    // Opening a folder that's already a known project must switch to it
-    // instead of trying (and failing) to register a duplicate.
     const normalized = path.replace(/[\\/]+$/, '');
     const existing = projects.find(p => p.path.replace(/[\\/]+$/, '') === normalized);
     if (existing) {
@@ -229,7 +333,6 @@ export function AppStateProvider({ children }) {
     if (mode === 'file') await openFileFromPath(path);
   };
 
-  // ── File tabs, kept in sync with the URL ─────────────────────────────
   const openFileLocal = useCallback((path, cursor) => {
     setOpenFiles(prev => {
       const name = path.substring(path.lastIndexOf('/') + 1);
@@ -241,18 +344,13 @@ export function AppStateProvider({ children }) {
     if (cursor && (cursor.line || cursor.column)) {
       editorCtx.updateCursor(cursor.line || 1, cursor.column || 1);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // User-initiated file open (tree click, chat "open file", knowledge page) —
-  // updates the URL too, so the open file is deep-linkable/restorable.
   const openFile = useCallback((path) => {
     openFileLocal(path);
     if (activeProject) navigate(fileURL(activeProject.id, path));
   }, [openFileLocal, activeProject, navigate]);
 
-  // Called by the route-sync hook when the URL names a file that isn't open
-  // yet. Must not re-navigate — the URL is already the source of truth here.
   const openFileFromRoute = useCallback((path, cursor) => {
     openFileLocal(path, cursor);
   }, [openFileLocal]);
@@ -276,9 +374,6 @@ export function AppStateProvider({ children }) {
     }
   };
 
-  // Keep open editor tabs (and the URL) in sync when the file tree renames or
-  // deletes something out from under them — otherwise a stale tab/URL would
-  // keep pointing at a path that no longer exists.
   const handleFileRenamed = (oldPath, newPath) => {
     const remap = path => (path === oldPath ? newPath : (path.startsWith(oldPath + '/') ? newPath + path.slice(oldPath.length) : path));
     setOpenFiles(files => files.map(f => {
@@ -306,17 +401,6 @@ export function AppStateProvider({ children }) {
     }
   };
 
-  // Cursor position is written into the URL (?line=&col=) so the AI's editor
-  // context and a deep link both reflect exactly where the user is — debounced
-  // and history-replacing since it fires on every cursor move.
-  //
-  // Reads window.location directly (not the useLocation()/useSearchParams()
-  // hook values) because this provider sits above <Routes>, and by the time
-  // the debounce timer fires, this component's own hook-derived `location`
-  // has been observed to still report the pre-navigation pathname (the
-  // /files/* segment missing) even though the browser's actual URL is
-  // already correct — reading the DOM's live location sidesteps that
-  // staleness entirely and is always accurate.
   const cursorSyncTimer = useRef(null);
   const updateCursorAndSync = (line, column) => {
     editorCtx.updateCursor(line, column);
@@ -325,6 +409,14 @@ export function AppStateProvider({ children }) {
       const next = new URLSearchParams(window.location.search);
       next.set('line', String(line));
       next.set('col', String(column));
+      const sel = editorCtx.context.selection;
+      if (sel) {
+        next.set('sel_start', String(sel.start_line));
+        next.set('sel_end', String(sel.end_line));
+      } else {
+        next.delete('sel_start');
+        next.delete('sel_end');
+      }
       navigate(`${window.location.pathname}?${next.toString()}`, { replace: true });
     }, 400);
   };
@@ -355,10 +447,70 @@ export function AppStateProvider({ children }) {
   const handleNavigate = (key) => {
     if (key === 'conversations') navigate('/conversations');
     else if (key === 'knowledge' && activeProject) navigate(`/projects/${activeProject.id}/knowledge`);
+    else if (key === 'db' && activeProject) navigate(`/projects/${activeProject.id}/db`);
+    else if (key === 'settings') {
+      openFile('/__settings__');
+    }
   };
+
+  const indexProcesses = (() => {
+    const procs = [];
+    const s = indexStatus;
+
+    const scanActive = s.status === 'scanning' || s.status === 'running';
+    const scanDone   = s.status === 'completed' || s.status === 'completed_with_errors';
+    if (scanActive || scanDone) {
+      const completed = (s.processed || 0) + (s.skipped || 0);
+      const pct = s.total > 0 ? Math.round((completed / s.total) * 100) : null;
+      procs.push({
+        id: 'scan',
+        phase: 'scan',
+        status: scanActive ? 'running' : (s.status === 'completed_with_errors' ? 'error' : 'done'),
+        label: scanActive ? 'Indexing workspace' : 'Index complete',
+        detail: '',
+        progress: pct,
+        stats: {
+          Files: s.total > 0 ? `${completed}/${s.total}` : '—',
+          Skipped: String(s.skipped || 0),
+          ...(s.errors > 0 ? { Errors: String(s.errors) } : {}),
+        },
+      });
+    }
+
+    const enrStatus = s.enrichmentStatus;
+    const enrActive  = enrStatus === 'running' || enrStatus === 'queued';
+    const enrAgg     = enrStatus === 'aggregating';
+    const enrDone    = enrStatus === 'done';
+    const enrPending = enrStatus === 'pending_confirmation';
+    if (enrActive || enrAgg || enrDone || enrPending) {
+      const durSec = s.enrichmentDurationMs > 0
+        ? (s.enrichmentDurationMs / 1000).toFixed(1) + 's'
+        : '—';
+      procs.push({
+        id: 'enrichment',
+        phase: 'enrichment',
+        status: enrPending ? 'pending_confirmation' : ((enrActive || enrAgg) ? 'running' : 'done'),
+        label: enrPending
+          ? `Ready to build AI knowledge for ${s.enrichmentRemaining || 0} file${s.enrichmentRemaining === 1 ? '' : 's'}`
+          : (enrAgg ? 'Building module summaries' : (enrDone ? 'AI knowledge ready' : 'Enriching AI knowledge')),
+        detail: s.enrichmentPath || '',
+        progress: null,     // indeterminate
+        stats: enrPending ? {} : {
+          Remaining: enrActive ? String(s.enrichmentRemaining || 0) : '—',
+          Embeddings: String(s.enrichmentEmbedded || 0),
+          Summaries:  String(s.enrichmentSummaries || 0),
+          Time: durSec,
+        },
+      });
+    }
+
+    return procs;
+  })();
 
   const value = {
     themeID, themeSettingsOpen, setThemeSettingsOpen, selectTheme,
+    fontSettingsOpen, setFontSettingsOpen, fontSettings, updateFontSettings,
+    editorSettings, updateEditorSettings,
     activeTheme, studioStyle, studioClassName, antTheme,
     workspacePickerMode, setWorkspacePickerMode, handleWorkspacePickerSelect,
     projects, projectsLoaded, activeProject, selectProject, switchToProject,
@@ -367,6 +519,9 @@ export function AppStateProvider({ children }) {
     requestedSessionId, aiPreview, setAiPreview,
     layout, toggleLayout,
     indexStatus, setIndexStatus, scanNotificationMinimized, setScanNotificationMinimized,
+    stopIndexing,
+    approveEnrichment,
+    indexProcesses,
     editorCtx,
     openFiles, activeTab, refreshTrigger, setRefreshTrigger,
     openFile, openFileFromRoute, handleTabChange, handleTabEdit,
@@ -375,5 +530,17 @@ export function AppStateProvider({ children }) {
     handleOpenConversation, handleNavigate,
   };
 
-  return <AppStateContext.Provider value={value}>{children}</AppStateContext.Provider>;
+  if (!settingsLoaded) {
+    return (
+      <div style={{ height: '100vh', width: '100vw', display: 'grid', placeItems: 'center', background: 'var(--studio-bg, #f7f4ed)' }}>
+        <div style={{ color: 'var(--studio-muted, #999)' }}>Loading configurations...</div>
+      </div>
+    );
+  }
+
+  return (
+    <AppStateContext.Provider value={value}>
+      {children}
+    </AppStateContext.Provider>
+  );
 }

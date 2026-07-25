@@ -1,23 +1,30 @@
 import React from 'react';
-import { Typography, Button, Tabs, Tooltip, Avatar, Breadcrumb, Space } from 'antd';
+import { Typography, Button, Tabs, Tooltip, Avatar, Breadcrumb, Space, Dropdown } from 'antd';
 import {
   FolderOpenOutlined, FileOutlined, SettingOutlined, SearchOutlined,
   AppstoreOutlined, UserOutlined, BranchesOutlined, PlusOutlined,
-  EllipsisOutlined, CodeOutlined, DatabaseOutlined,
+  EllipsisOutlined, CodeOutlined, DatabaseOutlined, BgColorsOutlined, FontSizeOutlined,
 } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import FileTree from '../components/FileTree';
 import EditorPanel from '../components/EditorPanel';
+import SettingsTab from '../components/SettingsTab';
 import ChatPanel from '../components/ChatPanel';
 import TopNavbar from '../components/TopNavbar';
 import StatusBar from '../components/StatusBar';
 import DragHandle from '../components/DragHandle';
-import ThemeSettingsModal from '../components/ThemeSettingsModal';
+import IndexActivityWidget from '../components/IndexActivityWidget';
+
 import { useAppState } from '../state/useAppState';
 import { folderNameFromPath } from '../state/folderNameFromPath';
 import { useProjectRouteSync, useFileRouteSync } from '../hooks/useRouteSync';
 
 const { Text } = Typography;
+
+const settingsMenuItems = [
+  { key: 'theme', icon: <BgColorsOutlined />, label: 'Theme' },
+  { key: 'fonts', icon: <FontSizeOutlined />, label: 'Fonts' },
+];
 
 export default function EditorPage() {
   const navigate = useNavigate();
@@ -27,6 +34,8 @@ export default function EditorPage() {
   const {
     studioStyle, studioClassName, activeTheme,
     themeSettingsOpen, setThemeSettingsOpen, themeID, selectTheme,
+    fontSettingsOpen, setFontSettingsOpen, fontSettings, updateFontSettings,
+    editorSettings,
     activeProject, handleNavigate, handleOpenFile, handleCreateProject,
     layout, toggleLayout,
     sidebarWidth, chatWidth, handleSidebarDrag, handleChatDrag, sidebarStartRef, chatStartRef,
@@ -34,14 +43,14 @@ export default function EditorPage() {
     openFile, handleTabChange, handleTabEdit, handleFileRenamed, handleFileDeleted, updateCursorAndSync,
     aiPreview, setAiPreview,
     requestedSessionId,
-    indexStatus, scanNotificationMinimized, setScanNotificationMinimized,
+    indexStatus,
   } = useAppState();
 
   if (!activeProject || activeProject.id !== projectId) return null;
 
   const folderName = folderNameFromPath(activeProject.path);
   const breadcrumbItems = activeTab
-    ? [folderName, ...activeTab.split(/[\\/]/).filter(Boolean)].map((title, index, items) => ({
+    ? activeTab.split(/[\\/]/).filter(Boolean).map((title, index, items) => ({
         title: index === items.length - 1
           ? <Text style={{ color: 'var(--studio-text, #2f2a26)', fontSize: 12 }}>{title}</Text>
           : title,
@@ -92,7 +101,21 @@ export default function EditorPage() {
 
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 24, width: '100%', paddingBottom: 8 }}>
             <Tooltip placement="right" title="Settings">
-              <SettingOutlined onClick={() => setThemeSettingsOpen(true)} style={{ fontSize: 24, color: 'var(--studio-subtle, #91877e)', cursor: 'pointer' }} />
+              <Dropdown
+                trigger={['click']}
+                placement="rightBottom"
+                menu={{
+                  items: settingsMenuItems,
+                  onClick: ({ key }) => {
+                    if (key === 'theme') setThemeSettingsOpen(true);
+                    else if (key === 'fonts') setFontSettingsOpen(true);
+                  },
+                }}
+              >
+                <span style={{ display: 'inline-flex', cursor: 'pointer' }}>
+                  <SettingOutlined style={{ fontSize: 24, color: 'var(--studio-subtle, #91877e)' }} />
+                </span>
+              </Dropdown>
             </Tooltip>
             <Avatar icon={<UserOutlined />} size={24} style={{ backgroundColor: 'var(--studio-border, #d8d1c5)', color: 'var(--studio-text, #2f2a26)', cursor: 'pointer' }} />
           </div>
@@ -116,13 +139,6 @@ export default function EditorPage() {
                 <Button type="text" size="small" icon={<PlusOutlined style={{ color: 'var(--studio-muted, #746b63)', fontSize: 12 }} />} onClick={handleCreateProject} />
                 <Button type="text" size="small" icon={<EllipsisOutlined style={{ color: 'var(--studio-muted, #746b63)', fontSize: 12 }} />} />
               </Space>
-            </div>
-
-            <div style={{
-              display: 'flex', alignItems: 'center', padding: '4px 16px',
-              fontSize: '11px', fontWeight: 600, color: 'var(--studio-text, #2f2a26)', textTransform: 'uppercase', cursor: 'pointer'
-            }}>
-              <FolderOpenOutlined style={{ marginRight: 6 }} /> {folderName}
             </div>
 
             <div style={{ flex: 1, overflow: 'hidden' }}>
@@ -155,8 +171,12 @@ export default function EditorPage() {
                   key: f.path,
                   label: (
                     <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                      <FileOutlined style={{ color: 'var(--studio-accent, #c15f3c)' }} />
-                      {f.name}
+                      {f.path === '/__settings__' ? (
+                        <SettingOutlined style={{ color: 'var(--studio-accent, #c15f3c)' }} />
+                      ) : (
+                        <FileOutlined style={{ color: 'var(--studio-accent, #c15f3c)' }} />
+                      )}
+                      {f.path === '/__settings__' ? 'Settings' : f.name}
                     </span>
                   ),
                   closable: true
@@ -172,11 +192,15 @@ export default function EditorPage() {
           )}
 
           <div style={{ flex: 1, overflow: 'hidden', position: 'relative' }}>
-            {activeTab ? (
+            {activeTab === '/__settings__' ? (
+              <SettingsTab />
+            ) : activeTab ? (
               <EditorPanel
                 filepath={activeTab}
                 darkMode={activeTheme.dark}
                 aiPreview={aiPreview}
+                fontSettings={fontSettings}
+                editorSettings={editorSettings}
                 initialCursor={editorCtx.context.cursor}
                 onCursorChange={updateCursorAndSync}
                 onSelectionChange={editorCtx.updateSelection}
@@ -217,9 +241,7 @@ export default function EditorPage() {
 
       </div>
 
-      <StatusBar indexStatus={indexStatus} scanMinimized={scanNotificationMinimized} onScanMinimize={() => setScanNotificationMinimized(true)} onScanExpand={() => setScanNotificationMinimized(false)} />
-
-      <ThemeSettingsModal open={themeSettingsOpen} selectedTheme={themeID} onSelect={selectTheme} onClose={() => setThemeSettingsOpen(false)} />
+      <StatusBar indexStatus={indexStatus} cursor={editorCtx.context.cursor} activeTab={activeTab} selectionLength={editorCtx.context.selectionLength} />
     </div>
   );
 }

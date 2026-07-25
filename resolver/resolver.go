@@ -31,6 +31,17 @@ func (r *ReferenceResolver) SetKnowledgeWorkspace(workspaceID string, embedder k
 	r.EmbeddingModel = embeddingModel
 }
 
+// SetKnowledgeWorkspaceID updates just the active workspace ID, leaving the
+// embedder/model untouched. Used to re-sync the resolver to the project a
+// specific request actually belongs to (see agent.Run) without needing the
+// caller to re-supply the embedder — WorkspaceID is the only field that
+// varies per project; Embedder/EmbeddingModel are a single global config.
+func (r *ReferenceResolver) SetKnowledgeWorkspaceID(workspaceID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.WorkspaceID = workspaceID
+}
+
 // RetrieveKnowledge augments deterministic editor resolution with persisted
 // exact/summary matches and a secondary semantic signal.
 func (r *ReferenceResolver) RetrieveKnowledge(ctx context.Context, prompt string, state editor.EditorState, resolved []Candidate) ([]knowledge.Candidate, error) {
@@ -40,14 +51,22 @@ func (r *ReferenceResolver) RetrieveKnowledge(ctx context.Context, prompt string
 	if workspaceID == "" {
 		return nil, nil
 	}
-	exact, err := r.DB.SearchKnowledge(ctx, workspaceID, prompt, 12)
+	// These DB reads run detached from the request's cancellation: they're
+	// cheap, side-effect-free lookups, and a client disconnecting mid-read has
+	// been observed to segfault inside the pure-Go SQLite driver (modernc.org/
+	// sqlite's context-cancellation watcher calling sqlite3_interrupt while a
+	// WAL page walk is in flight, then racing a pooled connection handed to
+	// the next query). Letting the read finish harmlessly is strictly safer
+	// than deciding based on a context that may cancel underneath it.
+	dbCtx := context.WithoutCancel(ctx)
+	exact, err := r.DB.SearchKnowledge(dbCtx, workspaceID, prompt, 12)
 	if err != nil {
 		return nil, err
 	}
 	if embedder != nil && hasSemanticIntent(prompt) {
 		vectors, embedErr := embedder.Embed(ctx, []string{prompt})
 		if embedErr == nil && len(vectors) == 1 {
-			semantic, searchErr := r.DB.SearchEmbeddings(ctx, workspaceID, model, vectors[0], 6)
+			semantic, searchErr := r.DB.SearchEmbeddings(dbCtx, workspaceID, model, vectors[0], 6)
 			if searchErr == nil {
 				exact = append(exact, semantic...)
 			}
@@ -57,7 +76,7 @@ func (r *ReferenceResolver) RetrieveKnowledge(ctx context.Context, prompt string
 		if path == "" {
 			return
 		}
-		candidate, pathErr := r.DB.KnowledgeForPath(ctx, workspaceID, path)
+		candidate, pathErr := r.DB.KnowledgeForPath(dbCtx, workspaceID, path)
 		if pathErr == nil {
 			candidate.Score = score
 			candidate.Reasons = []string{reason}
