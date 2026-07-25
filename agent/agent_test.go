@@ -139,3 +139,48 @@ func TestAgentDoesNotRetryWhenToolAlreadyCalled(t *testing.T) {
 		t.Fatalf("expected the original response (with its code block) to be left alone, got %q", finalContent)
 	}
 }
+
+// TestAgentNudgesPastRunawayThinking reproduces (deterministically) the live
+// failure where a small model spent thousands of thinking tokens re-deriving
+// the same conclusion without ever committing to an action. The first
+// scripted response simulates that — far more thinking-only lines than
+// maxThinkingTokens, no done — which run.Step must cut off on its own rather
+// than reading to completion. Run should then give it one direct nudge
+// ("stop analyzing, act now") and use the second scripted response — a real
+// tool call — as the actual result, the same "one corrective chance" pattern
+// already proven for narratedInsteadOfActing.
+func TestAgentNudgesPastRunawayThinking(t *testing.T) {
+	agentInstance, _, sessionID := newAgentTestEnvironment(t)
+
+	var runaway strings.Builder
+	for i := 0; i < maxThinkingTokens*2; i++ {
+		runaway.WriteString(`{"message":{"thinking":"still thinking "}}` + "\n")
+	}
+
+	withTransport(t, scriptedTransport(t, []string{
+		runaway.String(),
+		`{"message":{"tool_calls":[{"id":"call-1","function":{"name":"read_file","arguments":{"path":"HelpController.php"}}}]},"done":true}`,
+		`{"message":{"content":"Here is the file."},"done":true}`,
+	}))
+
+	var toolCalls []string
+	emit := func(event string, data any) {
+		if event != "tool_call" {
+			return
+		}
+		if m, ok := data.(map[string]any); ok {
+			toolCalls = append(toolCalls, m["name"].(string))
+		}
+	}
+
+	finalContent, err := agentInstance.Run(context.Background(), sessionID, "show me HelpController.php", "test", false, "", editor.EditorState{}, emit)
+	if err != nil {
+		t.Fatalf("Run returned an error: %v", err)
+	}
+	if len(toolCalls) != 1 || toolCalls[0] != "read_file" {
+		t.Fatalf("expected the thinking-budget nudge to result in exactly one read_file call, got %v", toolCalls)
+	}
+	if finalContent != "Here is the file." {
+		t.Fatalf("expected the final answer to come from after the nudge's tool call completed, got %q", finalContent)
+	}
+}

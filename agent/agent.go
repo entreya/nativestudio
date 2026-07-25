@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/entreya/nativestudio/db"
@@ -22,7 +23,7 @@ import (
 
 const assistantSystemPrompt = `You are the coding assistant inside NativeStudio.
 Answer the user in clear natural language, not as JSON. Use the provided tools through native tool calls; never print a tool-call JSON object in the answer.
-Use the active file and editor context when relevant. When the user's request is short or does not name a target (e.g. "explain", "fix this", "refactor", "what does this do"), assume they mean the active file open in the editor and answer about that file — do not ask them to paste code you already have access to; use read_file if you need more of it than is already shown. When a "selected_text" block is present, that is the user's current selection — do not treat it as the whole picture: read the surrounding code in the same active file (the function/class it sits in, its callers, nearby definitions) before answering, since the selection alone is rarely enough to judge correctness, side effects, or naming. CRITICAL: Never write code blocks in the chat response. To edit a file, use replace_in_file or apply_patch. To create a file, use create_file. To remove a file, use delete_file. File mutations are staged for the user to approve or reject. For installing packages, scaffolding a new project/framework (e.g. a Composer or npm package, "yii2-app-basic", a boilerplate), or running build/test commands, use run_command instead of hand-writing the files those tools would generate yourself — you do not reliably know the exact files a framework installer produces, and guessing produces broken projects. run_command is also staged for approval before it runs. Your text response should only explain briefly what you changed and why. If the request is materially ambiguous and choosing incorrectly could change the result, call ask_follow_up directly with one concise question, the appropriate input type, and useful short options. Use multiselect when several answers can apply. Never narrate an instruction such as "Ask the user". If a request depends on unfamiliar or current facts, call search_internet before answering instead of guessing. If the user's message is casual conversation — a greeting, a joke, song lyrics, small talk, or anything else unrelated to the code or project — that is not an error, not out of scope, and not something you lack the ability to understand: reply naturally and warmly like a friendly conversational partner, in whatever language or tone they used, then briefly invite them back to the project. For example, if the user sends song lyrics or an unrelated one-liner, a good reply looks like "Haha, love that energy! Whenever you're ready to get back to the project, I'm here." — NOT a request for clarification and NOT an apology. Never refuse, say you're not sure what they mean, or apologize for a harmless message just because it isn't a coding request.`
+Use the active file and editor context when relevant. When the user's request is short or does not name a target (e.g. "explain", "fix this", "refactor", "what does this do"), assume they mean the active file open in the editor and answer about that file — do not ask them to paste code you already have access to; use read_file if you need more of it than is already shown. When a "selected_text" block is present, that is the user's current selection — do not treat it as the whole picture: read the surrounding code in the same active file (the function/class it sits in, its callers, nearby definitions) before answering, since the selection alone is rarely enough to judge correctness, side effects, or naming. CRITICAL: Never write code blocks in the chat response. To edit a file, use replace_in_file or apply_patch. To create a file, use create_file. To remove a file, use delete_file. File mutations are staged for the user to approve or reject. For installing packages, scaffolding a new project/framework (e.g. a Composer or npm package, "yii2-app-basic", a boilerplate), or running build/test commands, use run_command instead of hand-writing the files those tools would generate yourself — you do not reliably know the exact files a framework installer produces, and guessing produces broken projects. run_command is also staged for approval before it runs. Your text response should only explain briefly what you changed and why. If the request is materially ambiguous and choosing incorrectly could change the result, call ask_follow_up directly with one concise question, the appropriate input type, and useful short options. Use multiselect when several answers can apply. Never narrate an instruction such as "Ask the user". Not everything unfamiliar-sounding needs a search: for established, universal facts that cannot change over time (well-known history, math and science constants, language/syntax rules, standard definitions), just answer directly from what you already know — searching or asking a follow-up for something that is always true just wastes time. Reserve search_internet and ask_follow_up for things that are genuinely unfamiliar, ambiguous, or that change over time — current events, prices, the latest version of something, who currently holds some position. If a request depends on unfamiliar or current facts like that, call search_internet before answering instead of guessing. If the results don't give you a clear, exact answer, refine the query and search again rather than reasoning about it further without new information — searching is how you get unstuck, not more thinking. After a couple of searches, if you still don't have a clear picture, call ask_follow_up to confirm with the user instead of continuing to guess. More generally: if you notice yourself reconsidering the same point again without anything new to go on, that is the signal to take an action — call a tool, or call ask_follow_up — not to keep thinking it over. If the user's message is casual conversation — a greeting, a joke, song lyrics, small talk, or anything else unrelated to the code or project — that is not an error, not out of scope, and not something you lack the ability to understand: reply naturally and warmly like a friendly conversational partner, in whatever language or tone they used, then briefly invite them back to the project. For example, if the user sends song lyrics or an unrelated one-liner, a good reply looks like "Haha, love that energy! Whenever you're ready to get back to the project, I'm here." — NOT a request for clarification and NOT an apology. Never refuse, say you're not sure what they mean, or apologize for a harmless message just because it isn't a coding request.`
 
 // Agent orchestrates a multi-step agent run with tool calling.
 type Agent struct {
@@ -80,6 +81,31 @@ func (a *Agent) Run(
 	state editor.EditorState,
 	emit func(string, any),
 ) (string, error) {
+
+	// Tee every timeline-relevant event into a log that gets persisted with the
+	// assistant message, so reloading a conversation restores the same trace
+	// the user watched live instead of a bare answer with no reasoning shown.
+	// Wrapping here (rather than the step loop's emit) also captures the
+	// context-gathering events, which fire before the loop starts.
+	var timelineLog []map[string]any
+	var timelineMu sync.Mutex
+	baseEmit := emit
+	emit = func(event string, data any) {
+		if persistedTimelineEvents[event] {
+			timelineMu.Lock()
+			// Thinking arrives one token at a time; appending each as its own
+			// entry would store thousands of rows' worth of JSON per message.
+			// Fold consecutive tokens into the preceding entry instead.
+			if merged := mergeThinkingToken(timelineLog, event, data); merged {
+				timelineMu.Unlock()
+				baseEmit(event, data)
+				return
+			}
+			timelineLog = append(timelineLog, map[string]any{"type": event, "data": data})
+			timelineMu.Unlock()
+		}
+		baseEmit(event, data)
+	}
 
 	runID := generateRunID()
 	directConversation := isLightweightConversation(prompt)
@@ -156,7 +182,7 @@ func (a *Agent) Run(
 				"output": map[string]any{"query": query, "results": results},
 			})
 			var grounding strings.Builder
-			grounding.WriteString("WEB RESEARCH SUCCEEDED for the user's immediately preceding question. You MUST answer from these current results and include source URLs. Do not claim you lack real-time access, do not mention a training cutoff, and do not ask whether the user wants you to search.\n")
+			grounding.WriteString("WEB RESEARCH was run for the user's immediately preceding question. If these results actually answer it, use them and include source URLs — do not claim you lack real-time access or mention a training cutoff. If they don't (wrong topic, too generic, or otherwise not on point), say so plainly and either call search_internet yourself with a more specific query, or call ask_follow_up if you're not sure what would actually answer it — don't force an answer out of results that don't cover the question.\n")
 			for _, result := range results {
 				grounding.WriteString(fmt.Sprintf("- %s — %s — %s\n", result.Title, result.Description, result.URL))
 			}
@@ -267,12 +293,15 @@ func (a *Agent) Run(
 		})
 	}
 	// Some small local-model templates pay disproportionate attention to the
-	// final message. Repeat successful research after the current user message
-	// so it cannot be displaced by older conversation history.
+	// final message. Repeat the research after the current user message so it
+	// cannot be displaced by older conversation history — but as a decision to
+	// make, not an unconditional order, matching webGroundingMessage's own
+	// instruction: use it if it actually answers the question, otherwise
+	// search again or ask a follow-up instead of forcing an answer out of it.
 	if webGroundingMessage != "" {
 		messages = append(messages, OllamaMessage{
 			Role:    "user",
-			Content: "Use these completed web-search results to answer my preceding question now.\n" + webGroundingMessage,
+			Content: "Here is the completed web search for my preceding question. Check whether it actually answers what I asked before responding.\n" + webGroundingMessage,
 		})
 	}
 
@@ -295,12 +324,22 @@ func (a *Agent) Run(
 
 	// 6. Execute the loop
 	var finalContent string
+	// stepErrored marks a run that ended via a transport/timeout error rather
+	// than a real model response (e.g. the 10-minute per-step deadline in
+	// run.Step firing on unusually long generation). Confirmed via a live
+	// repro: without this, an errored step left finalContent empty, and the
+	// web-search grounding fallback below — meant only for a model that
+	// ignored good search results — would fire on the empty content too,
+	// silently replacing "the request failed" with a fabricated-looking
+	// "Yes, I found current reporting..." answer built from stale results.
+	stepErrored := false
 	runEmit := func(event string, data any) { emit(event, data) }
 	for {
 		done, newMessages, err := run.Step(ctx, messages, a.Registry, a.OllamaURL, runEmit)
 		if err != nil {
 			log.Printf("[agent] run %s step %d error: %v", runID, run.Steps, err)
 			emit("error", map[string]any{"message": err.Error()})
+			stepErrored = true
 			break
 		}
 		messages = newMessages
@@ -325,7 +364,7 @@ func (a *Agent) Run(
 	// response that did nothing. Paused (asked a real clarifying question)
 	// is excluded — that's a legitimate reason to have called no tool.
 	narratedInsteadOfActing := containsCodeBlock(finalContent) || (promptRequestsAction(prompt) && !run.Paused)
-	if !directConversation && run.Steps < run.MaxSteps && narratedInsteadOfActing && !anyToolMessage(messages) {
+	if !stepErrored && !directConversation && run.Steps < run.MaxSteps && narratedInsteadOfActing && !anyToolMessage(messages) {
 		messages = append(messages, OllamaMessage{
 			Role: "user",
 			Content: "You just described an action in your response instead of performing it — the chat response must never contain code blocks or " +
@@ -341,6 +380,7 @@ func (a *Agent) Run(
 			done, newMessages, err := run.Step(ctx, messages, a.Registry, a.OllamaURL, runEmit)
 			if err != nil {
 				log.Printf("[agent] run %s corrective retry error: %v", runID, err)
+				stepErrored = true
 				break
 			}
 			messages = newMessages
@@ -356,16 +396,70 @@ func (a *Agent) Run(
 		}
 	}
 
-	if len(webResults) > 0 && !responseGroundedInSuccessfulSearch(finalContent, webResults) {
+	// A generation that blew past run.Step's thinking-token budget without
+	// reaching content or a tool call gets exactly one direct nudge to stop
+	// analyzing and commit to an action, same "one chance" pattern as
+	// narratedInsteadOfActing above. If the nudge ALSO runs over budget,
+	// don't retry a third time (and don't leave the user with silence) —
+	// report it plainly instead.
+	if !stepErrored && run.ThinkingBudgetExceeded && run.Steps < run.MaxSteps {
+		run.ThinkingBudgetExceeded = false
+		messages = append(messages, OllamaMessage{
+			Role: "user",
+			Content: "You've been reasoning for a very long time without reaching a decision. Stop analyzing further: immediately call the single " +
+				"most relevant tool now, or call ask_follow_up if you genuinely need the user's input. Do not explain more — just act.",
+		})
+		for {
+			done, newMessages, err := run.Step(ctx, messages, a.Registry, a.OllamaURL, runEmit)
+			if err != nil {
+				log.Printf("[agent] run %s thinking-budget retry error: %v", runID, err)
+				stepErrored = true
+				break
+			}
+			messages = newMessages
+			if done {
+				for i := len(messages) - 1; i >= 0; i-- {
+					if messages[i].Role == "assistant" {
+						finalContent = messages[i].Content
+						break
+					}
+				}
+				break
+			}
+		}
+		if run.ThinkingBudgetExceeded && finalContent == "" {
+			finalContent = "I'm having trouble reaching a clear answer for this without taking too long. Could you rephrase the question or break it into a smaller one?"
+			emit("replace_content", map[string]any{"text": finalContent})
+		}
+	}
+
+	// run.Paused is excluded for the same reason as the corrective-retry check
+	// above: a real ask_follow_up question is a legitimate response to
+	// preflight results that turned out not to cover the question, not a
+	// deflection to correct. anyToolMessage is excluded too — if the model
+	// itself called search_internet again (per the grounding message's own
+	// instruction to refine the query rather than force an answer), that's
+	// the model actively working the problem, not something to override with
+	// stale results from the first, already-rejected search.
+	if !stepErrored && len(webResults) > 0 && !run.Paused && !anyToolMessage(messages) && !responseGroundedInSuccessfulSearch(finalContent, webResults) {
 		finalContent = groundedSearchFallback(webQuery, webResults)
 		emit("replace_content", map[string]any{"text": finalContent})
 	}
 
 	// 7. Save the final assistant response to DB.
 	if finalContent != "" {
+		var timelineJSON string
+		timelineMu.Lock()
+		if len(timelineLog) > 0 {
+			if encoded, err := json.Marshal(timelineLog); err == nil {
+				timelineJSON = string(encoded)
+			}
+		}
+		timelineMu.Unlock()
 		assistantMsg := ctxpkg.Message{
 			Role:      "assistant",
 			Content:   finalContent,
+			Timeline:  timelineJSON,
 			Timestamp: time.Now(),
 		}
 		savedAssistant := ctxpkg.Store.AppendMessage(sessionID, assistantMsg)
@@ -700,9 +794,35 @@ func responseIgnoredSuccessfulSearch(content string) bool {
 	return false
 }
 
+// responseHonestlyReportsIrrelevantResults distinguishes "I read the results
+// and they don't cover this" from the lazy training-cutoff deflections
+// responseIgnoredSuccessfulSearch catches. The former is a legitimate outcome
+// of a preflight search that missed — the model should not be forced into
+// citing links that don't actually answer the question — while the latter is
+// exactly the case the grounded-search fallback exists to correct.
+func responseHonestlyReportsIrrelevantResults(content string) bool {
+	lower := strings.ToLower(content)
+	markers := []string{
+		"don't contain information about", "do not contain information about",
+		"don't address", "do not address", "don't cover", "do not cover",
+		"doesn't cover", "does not cover", "don't mention", "do not mention",
+		"doesn't mention", "does not mention", "no information about",
+		"not relevant to", "aren't relevant to", "results don't", "results do not",
+	}
+	for _, marker := range markers {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 func responseGroundedInSuccessfulSearch(content string, results []internetSearchResult) bool {
 	if responseIgnoredSuccessfulSearch(content) {
 		return false
+	}
+	if responseHonestlyReportsIrrelevantResults(content) {
+		return true
 	}
 	for _, result := range results {
 		if result.URL != "" && strings.Contains(content, result.URL) {
@@ -736,6 +856,42 @@ func truncateRunes(text string, limit int) string {
 		return text
 	}
 	return string(runes[:limit])
+}
+
+// persistedTimelineEvents are the events the frontend's ThinkingTimeline
+// renders into entries — everything else (raw tokens, usage, bookkeeping) is
+// either redundant with the final saved content or not meaningful to replay.
+var persistedTimelineEvents = map[string]bool{
+	"agent_step":        true,
+	"thinking_token":    true,
+	"tool_call":         true,
+	"tool_result":       true,
+	"context_resolved":  true,
+	"context_candidate": true,
+	"context_built":     true,
+}
+
+// mergeThinkingToken folds a thinking_token event into the previous logged
+// entry if it was also a thinking_token, mirroring how the frontend
+// accumulates streamed thinking text into one timeline row. Returns true if
+// it merged (caller should not append a new entry).
+func mergeThinkingToken(log []map[string]any, event string, data any) bool {
+	if event != "thinking_token" || len(log) == 0 {
+		return false
+	}
+	last := log[len(log)-1]
+	if last["type"] != "thinking_token" {
+		return false
+	}
+	lastData, _ := last["data"].(map[string]any)
+	newData, _ := data.(map[string]any)
+	if lastData == nil || newData == nil {
+		return false
+	}
+	lastText, _ := lastData["text"].(string)
+	newText, _ := newData["text"].(string)
+	lastData["text"] = lastText + newText
+	return true
 }
 
 func reasoningGuidance(level string) string {

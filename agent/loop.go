@@ -80,10 +80,26 @@ type AgentRun struct {
 	// calls, so Run()'s corrective retry must not treat it as the
 	// "described the action instead of doing it" failure mode.
 	Paused bool
+	// ThinkingBudgetExceeded is set when Step aborted a generation that blew
+	// past maxThinkingTokens without producing content or a tool call —
+	// confirmed via live reproduction that this small model can otherwise
+	// spend thousands of tokens re-deriving the same conclusion in slightly
+	// different words without ever committing to an answer. Run() checks this
+	// to give the model one direct nudge to stop analyzing and act, the same
+	// pattern already used for narratedInsteadOfActing.
+	ThinkingBudgetExceeded bool
 }
 
 // DefaultMaxSteps is the maximum number of tool-call iterations before the agent stops.
 const DefaultMaxSteps = 15
+
+// maxThinkingTokens caps how many thinking chunks a single generation may
+// stream before Step aborts it as a runaway reasoning loop. Chosen from a
+// live-reproduced pathological case (8,792 tokens / ~7 minutes, never
+// concluding) versus normal multi-paragraph reasoning observed elsewhere in
+// the same testing (a few hundred tokens) — generous enough for real
+// reasoning, well short of the failure mode.
+const maxThinkingTokens = 1200
 
 // ollamaKeepAlive bounds how long Ollama keeps a model resident in memory
 // after the last request (Ollama's own default is 5 minutes). On a 16GB
@@ -178,6 +194,8 @@ func (run *AgentRun) Step(
 	var thinkingBuf strings.Builder
 	var contentBuf strings.Builder
 	var toolCalls []OllamaToolCall
+	thinkingChunks := 0
+	budgetExceeded := false
 
 	scanner := bufio.NewScanner(resp.Body)
 	// Increase buffer size for large responses
@@ -207,6 +225,7 @@ func (run *AgentRun) Step(
 		// Accumulate thinking tokens
 		if chunk.Message.Thinking != "" {
 			thinkingBuf.WriteString(chunk.Message.Thinking)
+			thinkingChunks++
 			emit("thinking_token", map[string]any{"text": chunk.Message.Thinking})
 		}
 
@@ -229,9 +248,26 @@ func (run *AgentRun) Step(
 			})
 			break
 		}
+
+		// Only trip while still purely reasoning — once real content or a
+		// tool call has started arriving, the model has already committed to
+		// an answer and cutting it off would just produce a truncated result
+		// instead of a runaway one.
+		if thinkingChunks > maxThinkingTokens && contentBuf.Len() == 0 && len(toolCalls) == 0 {
+			budgetExceeded = true
+			cancel()
+			break
+		}
 	}
-	if err := scanner.Err(); err != nil {
-		return true, messages, fmt.Errorf("read ollama stream: %w", err)
+	if !budgetExceeded {
+		if err := scanner.Err(); err != nil {
+			return true, messages, fmt.Errorf("read ollama stream: %w", err)
+		}
+	}
+	if budgetExceeded {
+		run.ThinkingBudgetExceeded = true
+		emit("thinking_token", map[string]any{"text": "\n\n[stopped: reasoning exceeded the time budget]"})
+		return true, messages, nil
 	}
 
 	// Some local models print a function call as JSON instead of using Ollama's

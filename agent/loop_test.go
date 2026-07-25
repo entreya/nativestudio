@@ -380,3 +380,44 @@ func TestStepStagesReviewablePatch(t *testing.T) {
 		t.Fatalf("patch was not persisted: %#v err=%v", patches, err)
 	}
 }
+
+// TestThinkingBudgetStopsRunawayReasoning reproduces (deterministically, via a
+// mocked transport rather than waiting on a real slow model) the failure mode
+// found live: a model that streams thinking chunks indefinitely without ever
+// reaching content or a tool call. Without maxThinkingTokens, Step would just
+// keep scanning every line the mock hands it and never return.
+func TestThinkingBudgetStopsRunawayReasoning(t *testing.T) {
+	originalTransport := http.DefaultClient.Transport
+	// Far more thinking-only chunks than maxThinkingTokens, and no "done":true
+	// line at all — if Step read the whole body, it would hang waiting for a
+	// done signal that never comes. A well-behaved cutoff must stop reading
+	// well before line maxThinkingTokens+1.
+	var body strings.Builder
+	for i := 0; i < maxThinkingTokens*2; i++ {
+		body.WriteString(`{"message":{"thinking":"still thinking "}}` + "\n")
+	}
+	http.DefaultClient.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(body.String())),
+			Request:    r,
+		}, nil
+	})
+	t.Cleanup(func() { http.DefaultClient.Transport = originalTransport })
+
+	run := &AgentRun{Model: "test", MaxSteps: 1}
+	done, messages, err := run.Step(context.Background(), nil, NewRegistry(t.TempDir()), "http://ollama.test", func(string, any) {})
+	if err != nil {
+		t.Fatalf("expected a clean stop, not an error: %v", err)
+	}
+	if !done {
+		t.Fatal("expected Step to report done=true once the thinking budget is exceeded")
+	}
+	if !run.ThinkingBudgetExceeded {
+		t.Fatal("expected ThinkingBudgetExceeded to be set")
+	}
+	if len(messages) != 0 {
+		t.Fatalf("expected no assistant message appended for an aborted generation, got %#v", messages)
+	}
+}
