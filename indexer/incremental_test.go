@@ -54,8 +54,14 @@ func TestIndexFileReplacesOnlyChangedFileAndStalesOldFacts(t *testing.T) {
 	if overviewErr != nil {
 		t.Fatal(overviewErr)
 	}
-	if overview.IndexedFiles != 1 || overview.Status.Status != "completed" {
+	if overview.IndexedFiles != 1 {
 		t.Fatalf("unexpected overview after indexing: %#v", overview)
+	}
+	// A watcher-driven single-file re-index must not surface as the workspace's
+	// index status — only full scans do, so one save can't overwrite a running
+	// scan's progress with its own "1 file" totals.
+	if overview.Status.Status != "not_indexed" {
+		t.Fatalf("incremental run should not report as workspace index status, got %q", overview.Status.Status)
 	}
 	var files int
 	if err := database.QueryRow(`SELECT COUNT(*) FROM repository_files WHERE workspace_id=?`, project.ID).Scan(&files); err != nil || files != 1 {

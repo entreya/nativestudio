@@ -55,6 +55,8 @@ func (c *Coordinator) enrichmentLoop(ctx context.Context, workspaceID, root stri
 	// pendingConfirmationEmitted avoids re-emitting the same "waiting for
 	// approval" event on every 2s poll tick while jobs sit queued.
 	pendingConfirmationEmitted := false
+	// pausedEmitted does the same for the paused state.
+	pausedEmitted := false
 	// lastChangedModules accumulates top-level module dirs that changed in the
 	// current enrichment cycle. Cleared after the aggregate summary pass runs.
 	lastChangedModules := map[string]struct{}{}
@@ -135,6 +137,19 @@ func (c *Coordinator) enrichmentLoop(ctx context.Context, workspaceID, root stri
 			continue
 		}
 
+		// Paused by the user: leave the queue exactly as it is and wait for a
+		// resume. The poll ticker keeps this loop alive so no wake-up signal is
+		// needed when ResumeEnrichment lands.
+		if c.IsEnrichmentPaused(workspaceID) {
+			if !pausedEmitted {
+				remaining, _ := c.DB.PendingIndexJobCount(ctx, workspaceID, "file_enrichment")
+				c.Broker.Emit(workspaceID, "enrichment_paused", map[string]any{"remaining": remaining})
+				pausedEmitted = true
+			}
+			continue
+		}
+		pausedEmitted = false
+
 		// Enrichment calls the AI model, unlike the free scan above — don't
 		// touch queued jobs until the user has explicitly approved it.
 		if !c.IsEnrichmentApproved(workspaceID) {
@@ -189,6 +204,11 @@ func (c *Coordinator) drainWithWorkers(
 			defer wg.Done()
 			for {
 				if ctx.Err() != nil {
+					return
+				}
+				// Checked before each claim so a pause lands within one file
+				// rather than after the whole queue has drained.
+				if c.IsEnrichmentPaused(workspaceID) {
 					return
 				}
 				claimed, err := c.DB.ClaimIndexJob(ctx, workspaceID, "file_enrichment")

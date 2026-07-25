@@ -83,7 +83,10 @@ func DefaultScanConfig() ScanConfig {
 	return ScanConfig{
 		MaximumFileSizeBytes: 1 << 20,
 		ExcludedDirectories:  []string{".git", "node_modules", "vendor", "dist", "build", "coverage", "target", "tmp", "cache", ".cache", ".next", ".nuxt", "__pycache__"},
-		SensitivePatterns:    []string{".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "id_rsa", "id_ed25519", "credentials*", "secrets*", "*.sql", "*.dump"},
+		// *.sql is deliberately absent: schema and migration files are source
+		// code, and treating them as secrets silently dropped every migration
+		// in db/migrations from the index. Data dumps are still excluded.
+		SensitivePatterns: []string{".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "id_rsa", "id_ed25519", "credentials*", "secrets*", "*.dump", "*.sqlite", "*.sqlite3"},
 	}
 }
 

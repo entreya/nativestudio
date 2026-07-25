@@ -27,6 +27,9 @@ func (h *KnowledgeHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/projects/{id}/index", h.Reindex)
 	mux.HandleFunc("POST /api/projects/{id}/index/stop", h.StopIndex)
 	mux.HandleFunc("POST /api/projects/{id}/knowledge/enrichment/approve", h.ApproveEnrichment)
+	mux.HandleFunc("POST /api/projects/{id}/knowledge/enrichment/decline", h.DeclineEnrichment)
+	mux.HandleFunc("POST /api/projects/{id}/knowledge/enrichment/pause", h.PauseEnrichment)
+	mux.HandleFunc("POST /api/projects/{id}/knowledge/enrichment/resume", h.ResumeEnrichment)
 	mux.HandleFunc("POST /api/projects/{id}/index/files", h.ReindexFile)
 	mux.HandleFunc("POST /api/projects/{id}/knowledge/relearn", h.Relearn)
 	mux.HandleFunc("PATCH /api/projects/{id}/knowledge/facts/{factID}", h.UpdateFact)
@@ -112,7 +115,11 @@ func (h *KnowledgeHandler) Overview(w http.ResponseWriter, r *http.Request) {
 }
 func (h *KnowledgeHandler) Status(w http.ResponseWriter, r *http.Request) {
 	workspaceID := r.PathValue("id")
-	result, err := h.db.LatestIndexStatus(r.Context(), workspaceID, h.coordinator.IsEnrichmentApproved(workspaceID))
+	result, err := h.db.LatestIndexStatus(r.Context(), workspaceID, db.EnrichmentGate{
+		Approved: h.coordinator.IsEnrichmentApproved(workspaceID),
+		Declined: h.coordinator.IsEnrichmentDeclined(workspaceID),
+		Paused:   h.coordinator.IsEnrichmentPaused(workspaceID),
+	})
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
@@ -134,6 +141,23 @@ func (h *KnowledgeHandler) StopIndex(w http.ResponseWriter, r *http.Request) {
 }
 func (h *KnowledgeHandler) ApproveEnrichment(w http.ResponseWriter, r *http.Request) {
 	h.coordinator.ApproveEnrichment(r.PathValue("id"))
+	writeJSON(w, map[string]bool{"ok": true})
+}
+func (h *KnowledgeHandler) DeclineEnrichment(w http.ResponseWriter, r *http.Request) {
+	workspaceID := r.PathValue("id")
+	h.coordinator.DeclineEnrichment(workspaceID)
+	h.broker.Emit(workspaceID, "enrichment_declined", map[string]any{})
+	writeJSON(w, map[string]bool{"ok": true})
+}
+func (h *KnowledgeHandler) PauseEnrichment(w http.ResponseWriter, r *http.Request) {
+	workspaceID := r.PathValue("id")
+	h.coordinator.PauseEnrichment(workspaceID)
+	writeJSON(w, map[string]bool{"ok": true})
+}
+func (h *KnowledgeHandler) ResumeEnrichment(w http.ResponseWriter, r *http.Request) {
+	workspaceID := r.PathValue("id")
+	h.coordinator.ResumeEnrichment(workspaceID)
+	h.broker.Emit(workspaceID, "enrichment_resumed", map[string]any{})
 	writeJSON(w, map[string]bool{"ok": true})
 }
 func (h *KnowledgeHandler) Relearn(w http.ResponseWriter, r *http.Request) {
