@@ -3,6 +3,7 @@ package handlers
 import (
 	"fmt"
 	"net/http"
+	"strconv"
 
 	"github.com/entreya/nativestudio/db"
 )
@@ -81,8 +82,21 @@ func (h *DatabaseHandler) GetTableData(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2. Get data (limit 100)
-	dataRows, err := h.db.QueryContext(r.Context(), fmt.Sprintf("SELECT * FROM %q LIMIT 100", tableName))
+	// 2. Total row count, so the UI can say how much of the table it is
+	// showing. Without this the explorer silently displayed the first page
+	// and reported it as the row count — a 27,936-row table looked like it
+	// had 100 rows.
+	var totalRows int64
+	if err := h.db.QueryRowContext(r.Context(), fmt.Sprintf("SELECT COUNT(*) FROM %q", tableName)).Scan(&totalRows); err != nil {
+		totalRows = 0
+	}
+
+	// 3. Get the requested page.
+	limit := parsePositiveQueryInt(r, "limit", databasePageSize, maxDatabasePageSize)
+	offset := parsePositiveQueryInt(r, "offset", 0, 0)
+
+	dataRows, err := h.db.QueryContext(r.Context(),
+		fmt.Sprintf("SELECT * FROM %q LIMIT %d OFFSET %d", tableName, limit, offset))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -119,7 +133,32 @@ func (h *DatabaseHandler) GetTableData(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, map[string]interface{}{
-		"columns": columns,
-		"rows":    rows,
+		"columns":    columns,
+		"rows":       rows,
+		"total_rows": totalRows,
+		"limit":      limit,
+		"offset":     offset,
 	})
+}
+
+const (
+	databasePageSize    = 100
+	maxDatabasePageSize = 500
+)
+
+// parsePositiveQueryInt reads a non-negative integer query parameter, falling
+// back to fallbackValue when absent or malformed. maximum of 0 means no cap.
+func parsePositiveQueryInt(r *http.Request, key string, fallbackValue, maximum int) int {
+	raw := r.URL.Query().Get(key)
+	if raw == "" {
+		return fallbackValue
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < 0 {
+		return fallbackValue
+	}
+	if maximum > 0 && value > maximum {
+		return maximum
+	}
+	return value
 }
