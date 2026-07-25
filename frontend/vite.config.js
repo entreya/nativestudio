@@ -14,6 +14,7 @@ export default defineConfig({
         target: 'http://localhost:8080',
         changeOrigin: true,
         secure: false,
+        ws: true, // needed for the integrated terminal's websocket (/api/projects/{id}/terminal/ws)
       }
     }
   }

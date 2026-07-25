@@ -4,7 +4,7 @@ import { CheckOutlined, CloseOutlined, FileOutlined } from '@ant-design/icons';
 
 const { Text } = Typography;
 
-function DiffView({ diff }) {
+export function DiffView({ diff }) {
   return (
     <pre style={{ margin: 0, maxHeight: 400, overflow: 'auto', borderRadius: 6, background: 'var(--studio-panel, #f5f1e9)', fontSize: 11.5, lineHeight: 1.55 }}>
       {(diff || '').split('\n').map((line, index) => {

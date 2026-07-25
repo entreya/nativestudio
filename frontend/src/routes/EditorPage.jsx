@@ -14,6 +14,7 @@ import TopNavbar from '../components/TopNavbar';
 import StatusBar from '../components/StatusBar';
 import DragHandle from '../components/DragHandle';
 import IndexActivityWidget from '../components/IndexActivityWidget';
+import TerminalPanel from '../components/TerminalPanel';
 
 import { useAppState } from '../state/useAppState';
 import { folderNameFromPath } from '../state/folderNameFromPath';
@@ -39,6 +40,7 @@ export default function EditorPage() {
     activeProject, handleNavigate, handleOpenFile, handleCreateProject,
     layout, toggleLayout,
     sidebarWidth, chatWidth, handleSidebarDrag, handleChatDrag, sidebarStartRef, chatStartRef,
+    terminalHeight, handleTerminalDrag, terminalStartRef, pushTerminalActivity,
     editorCtx, openFiles, activeTab, refreshTrigger, setRefreshTrigger,
     openFile, handleTabChange, handleTabEdit, handleFileRenamed, handleFileDeleted, updateCursorAndSync,
     aiPreview, setAiPreview,
@@ -236,12 +238,30 @@ export default function EditorPage() {
             onPreviewChange={setAiPreview}
             onPreviewClear={() => setAiPreview(null)}
             onFilesChanged={() => setRefreshTrigger(prev => prev + 1)}
+            onTerminalActivity={pushTerminalActivity}
           />
         </div>}
 
       </div>
 
+      {layout.terminal && (
+        <>
+          <DragHandle
+            direction="horizontal"
+            onDrag={handleTerminalDrag}
+            onStart={() => { terminalStartRef.current = terminalHeight; }}
+          />
+          <div style={{ height: terminalHeight, minHeight: terminalHeight, flexShrink: 0, backgroundColor: darkTerminalBg(activeTheme.dark), borderTop: '1px solid var(--studio-border, #d8d1c5)', overflow: 'hidden' }}>
+            <TerminalPanel projectId={activeProject.id} darkMode={activeTheme.dark} />
+          </div>
+        </>
+      )}
+
       <StatusBar indexStatus={indexStatus} cursor={editorCtx.context.cursor} activeTab={activeTab} selectionLength={editorCtx.context.selectionLength} />
     </div>
   );
+}
+
+function darkTerminalBg(dark) {
+  return dark ? '#1e1c1a' : '#fffdf8';
 }

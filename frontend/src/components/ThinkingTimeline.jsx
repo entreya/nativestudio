@@ -27,6 +27,9 @@ function summaryFor(entry) {
     // evaluates the prompt, before the first token arrives.
     return entry.status === 'running' ? (entry.text || 'Working…') : (entry.doneText || 'Planned next action');
   }
+  if (entry.kind === 'rephrase') {
+    return 'Clarified your request';
+  }
   // kind === 'tool'
   const { name, input, output, status, error } = entry;
   switch (name) {
@@ -99,6 +102,21 @@ function ContextBody({ entry }) {
           Context built · {entry.tokens} / {entry.budget || 0} tokens
         </Text>
       )}
+    </div>
+  );
+}
+
+function RephraseBody({ entry }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <div>
+        <Text type="secondary" style={{ fontSize: 11 }}>You typed</Text>
+        <Text style={{ display: 'block', fontSize: 12, color: 'var(--studio-text, #2f2a26)' }}>{entry.original}</Text>
+      </div>
+      <div>
+        <Text type="secondary" style={{ fontSize: 11 }}>Sent to the model as</Text>
+        <Text style={{ display: 'block', fontSize: 12, fontStyle: 'italic', color: 'var(--studio-text, #2f2a26)' }}>{entry.rephrased}</Text>
+      </div>
     </div>
   );
 }
@@ -232,7 +250,7 @@ function ToolBody({ entry }) {
   );
 }
 
-const KIND_BODY = { thinking: ThinkingBody, context: ContextBody, tool: ToolBody };
+const KIND_BODY = { thinking: ThinkingBody, context: ContextBody, tool: ToolBody, rephrase: RephraseBody };
 
 /**
  * The collapsible right-hand content for one timeline entry — summary line,

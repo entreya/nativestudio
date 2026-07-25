@@ -42,6 +42,15 @@ func executeRunCommand(ctx context.Context, input ToolInput, meta ToolMeta) (Too
 		return ToolResult{OK: false, Error: "command is required"}, nil
 	}
 	cwdInput, _ := input["cwd"].(string)
+	return stageCommandForApproval(ctx, meta, command, cwdInput)
+}
+
+// stageCommandForApproval creates the CommandRun row that surfaces a
+// command in the approval popup (CommandReview) and waits for a human to
+// approve or reject it before CommandHandler.Approve actually runs it.
+// Shared by run_command (everything routes through here) and run_terminal
+// (only for the destructive commands it refuses to run instantly).
+func stageCommandForApproval(ctx context.Context, meta ToolMeta, command, cwdInput string) (ToolResult, error) {
 	if cwdInput == "" {
 		cwdInput = "."
 	}

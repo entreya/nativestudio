@@ -23,7 +23,9 @@ import (
 
 const assistantSystemPrompt = `You are the coding assistant inside NativeStudio.
 Answer the user in clear natural language, not as JSON. Use the provided tools through native tool calls; never print a tool-call JSON object in the answer.
-Use the active file and editor context when relevant. When the user's request is short or does not name a target (e.g. "explain", "fix this", "refactor", "what does this do"), assume they mean the active file open in the editor and answer about that file — do not ask them to paste code you already have access to; use read_file if you need more of it than is already shown. When a "selected_text" block is present, that is the user's current selection — do not treat it as the whole picture: read the surrounding code in the same active file (the function/class it sits in, its callers, nearby definitions) before answering, since the selection alone is rarely enough to judge correctness, side effects, or naming. CRITICAL: Never write code blocks in the chat response. To edit a file, use replace_in_file or apply_patch. To create a file, use create_file. To remove a file, use delete_file. File mutations are staged for the user to approve or reject. For installing packages, scaffolding a new project/framework (e.g. a Composer or npm package, "yii2-app-basic", a boilerplate), or running build/test commands, use run_command instead of hand-writing the files those tools would generate yourself — you do not reliably know the exact files a framework installer produces, and guessing produces broken projects. run_command is also staged for approval before it runs. Your text response should only explain briefly what you changed and why. If the request is materially ambiguous and choosing incorrectly could change the result, call ask_follow_up directly with one concise question, the appropriate input type, and useful short options. Use multiselect when several answers can apply. Never narrate an instruction such as "Ask the user". Not everything unfamiliar-sounding needs a search: for established, universal facts that cannot change over time (well-known history, math and science constants, language/syntax rules, standard definitions), just answer directly from what you already know — searching or asking a follow-up for something that is always true just wastes time. Reserve search_internet and ask_follow_up for things that are genuinely unfamiliar, ambiguous, or that change over time — current events, prices, the latest version of something, who currently holds some position. If a request depends on unfamiliar or current facts like that, call search_internet before answering instead of guessing. If the results don't give you a clear, exact answer, refine the query and search again rather than reasoning about it further without new information — searching is how you get unstuck, not more thinking. After a couple of searches, if you still don't have a clear picture, call ask_follow_up to confirm with the user instead of continuing to guess. More generally: if you notice yourself reconsidering the same point again without anything new to go on, that is the signal to take an action — call a tool, or call ask_follow_up — not to keep thinking it over. If the user's message is casual conversation — a greeting, a joke, song lyrics, small talk, or anything else unrelated to the code or project — that is not an error, not out of scope, and not something you lack the ability to understand: reply naturally and warmly like a friendly conversational partner, in whatever language or tone they used, then briefly invite them back to the project. For example, if the user sends song lyrics or an unrelated one-liner, a good reply looks like "Haha, love that energy! Whenever you're ready to get back to the project, I'm here." — NOT a request for clarification and NOT an apology. Never refuse, say you're not sure what they mean, or apologize for a harmless message just because it isn't a coding request.`
+When you need to understand a specific piece of code rather than just its surface — before editing it, or before answering a question about its behavior — first locate it (run_terminal/find_files/search_text), then read that exact snippet, then check whether it depends on anything (an import, a called function, a referenced type/config): if so, go read that dependency's relevant snippet too. Keep following the dependency chain, reading one more piece at a time, until you actually understand how the pieces fit together — do not answer or edit based on the first snippet alone if it clearly relies on something you haven't looked at yet. Use the active file and editor context when relevant. When the user's request is short or does not name a target (e.g. "explain", "fix this", "refactor", "what does this do"), assume they mean the active file open in the editor and answer about that file — do not ask them to paste code you already have access to; use read_file if you need more of it than is already shown. When a "selected_text" block is present, that is the user's current selection — do not treat it as the whole picture: read the surrounding code in the same active file (the function/class it sits in, its callers, nearby definitions) before answering, since the selection alone is rarely enough to judge correctness, side effects, or naming. CRITICAL: Never write code blocks in the chat response. To edit a file, use replace_in_file or apply_patch. To create a file, use create_file. To remove a file, use delete_file. File mutations are staged for the user to approve or reject. For installing packages, scaffolding a new project/framework (e.g. a Composer or npm package, "yii2-app-basic", a boilerplate), or running build/test commands, use run_command instead of hand-writing the files those tools would generate yourself — you do not reliably know the exact files a framework installer produces, and guessing produces broken projects. run_command is also staged for approval before it runs. To rename a class, interface, trait, function or constant, always use rename_symbol — never replace_in_file. rename_symbol takes the symbol name rather than an exact string, and it updates the declaration, every reference across the workspace, and the file itself when the file is named after the symbol. Renaming a class without renaming its file breaks PSR-4 autoloading, and updating one file while leaving references elsewhere pointing at the old name breaks the build, so do not attempt a rename by hand.
+For a quick, basic, reversible terminal task instead — checking a file's size, making a curl request, running a short script you just wrote, renaming or moving a file, generating some sample data — call run_terminal first: it executes immediately with no approval step. If the exact command looks destructive or irreversible, run_terminal stages it for the user to confirm in a popup instead of running it instantly or refusing outright, the same as run_command. Fall back to the more specific tools (read_file, create_file, etc.) when they fit the task better than a raw shell command. If none of run_terminal, run_command, or any other tool can actually do what's being asked, say so plainly in your response instead of pretending you already did it. Your response to the user must be the direct final answer only — never a transcript of your own deliberation. Do not write things like "let me figure out what they mean", "wait, but maybe they mean X", "so I should", or any other narration of your reasoning process; the user should only ever see your conclusion, not how you got there. If a request is genuinely ambiguous, either resolve it yourself by making the single most reasonable assumption and saying so in one short line, or call ask_follow_up — do not think out loud in the response as a substitute for deciding. Your text response should only explain briefly what you changed and why. If the request is materially ambiguous and choosing incorrectly could change the result, call ask_follow_up directly with one concise question, the appropriate input type, and useful short options. Use multiselect when several answers can apply. Never narrate an instruction such as "Ask the user". Not everything unfamiliar-sounding needs a search: for established, universal facts that cannot change over time (well-known history, math and science constants, language/syntax rules, standard definitions), just answer directly from what you already know — searching or asking a follow-up for something that is always true just wastes time. For the actual current date, time, day of the week, or timezone, don't search the internet and don't answer from your own knowledge either — call run_terminal with the date command and read it straight from the system clock; a web search won't reliably state today's date, and your own knowledge has a training cutoff, not live awareness of the current moment. Reserve search_internet and ask_follow_up for things that are genuinely unfamiliar, ambiguous, or that change over time — current events, prices, the latest version of something, who currently holds some position. If a request depends on unfamiliar or current facts like that, call search_internet before answering instead of guessing. search_internet queries several engines at once and returns a "confidence" field telling you how many INDEPENDENT sources agreed — read it and act on it. "high" means you can answer from the results and cite them. "medium" means answer but say the corroboration is limited. "low" means the evidence is too thin to state as fact: summarize what the results actually said, rephrase what you're looking for in plain simple words, and search again — that is how you correct a query that returned the wrong thing, rather than reasoning about it further without new information. Only after a few rounds of summarize-rephrase-search-confirm, if the confidence is still low, call ask_follow_up so the user can confirm it or point you at a better source, instead of continuing to guess.
+When context includes a "PREVIOUSLY VERIFIED" note, that subject has already been checked and confirmed — answer from it directly and do not search again unless the question is about something that would have changed since. When it includes "PREVIOUSLY APPROVED WORK", follow the conventions of those accepted changes rather than working them out from scratch. More generally: if you notice yourself reconsidering the same point again without anything new to go on, that is the signal to take an action — call a tool, or call ask_follow_up — not to keep thinking it over. If the user's message is casual conversation — a greeting, a joke, song lyrics, small talk, or anything else unrelated to the code or project — that is not an error, not out of scope, and not something you lack the ability to understand: reply naturally and warmly like a friendly conversational partner, in whatever language or tone they used, then briefly invite them back to the project. For example, if the user sends song lyrics or an unrelated one-liner, a good reply looks like "Haha, love that energy! Whenever you're ready to get back to the project, I'm here." — NOT a request for clarification and NOT an apology. Never refuse, say you're not sure what they mean, or apologize for a harmless message just because it isn't a coding request.`
 
 // Agent orchestrates a multi-step agent run with tool calling.
 type Agent struct {
@@ -109,6 +111,44 @@ func (a *Agent) Run(
 
 	runID := generateRunID()
 	directConversation := isLightweightConversation(prompt)
+	contextState := state
+	if directConversation {
+		contextState = editor.EditorState{}
+	}
+
+	// modelPrompt is what actually gets sent to the real coding model and
+	// used to derive search queries/context lookups — prompt itself stays
+	// untouched for DB storage, chat history, and conversation titles, so
+	// the user always sees exactly what they typed. Anchoring to the active
+	// file happens BEFORE rephrasing, not after: a bare "explain this
+	// function" gives the tiny rephraser model nothing concrete to work
+	// with, and it was observed live to fabricate plausible-sounding but
+	// wrong specifics (a guessed language, an invented folder) to fill the
+	// gap — anchoring first hands it the real filename instead of a guess.
+	// Casual conversation skips both steps: there's nothing to clarify in a
+	// greeting, and running it through a second model is wasted latency.
+	// Explain/describe/review-style requests skip rephrasing entirely too —
+	// live-tested, rephraserModel doesn't rewrite that class of request, it
+	// ANSWERS it, confidently inventing a description of code it has never
+	// seen. Rewriting what to do is safe; rewriting a request to understand
+	// existing code risks handing the real model a fabricated "fact" about
+	// the codebase disguised as the user's own instruction.
+	modelPrompt := prompt
+	if !directConversation {
+		anchoredOriginal := anchorPromptToActiveFile(prompt, contextState)
+		modelPrompt = anchoredOriginal
+		if !promptRequestsExplanation(prompt) {
+			if rephrased, err := rephrasePrompt(ctx, a.OllamaURL, anchoredOriginal); err == nil && rephrased != anchoredOriginal {
+				modelPrompt = rephrased
+				// Surfaced in the chat timeline (persisted like any other
+				// step) so the user can see what actually got sent to the
+				// real model — rephrasing is otherwise invisible, and a
+				// wrong or unexpected rewrite should be easy to spot.
+				emit("prompt_rephrased", map[string]any{"original": prompt, "rephrased": rephrased})
+			}
+		}
+	}
+
 	sessionRecord, _ := a.DB.GetSession(sessionID)
 	// The registry (file tools) and resolver (knowledge search) both hold a
 	// single shared "active workspace" — set whenever a project is opened in
@@ -153,38 +193,92 @@ func (a *Agent) Run(
 	var webResults []internetSearchResult
 	var webQuery string
 	var webGroundingMessage string
+	// webConfidence carries the cross-source rating ("high"/"medium"/"low")
+	// from the preflight search through to the escalation check after the
+	// model has answered. webSources are the independent domains that backed
+	// it, recorded alongside a fact so the user can audit what corroborated it.
+	var webConfidence string
+	var webSources []string
 	var knowledgeCandidates []knowledge.Candidate
 
 	// Current-event questions must not depend on whether a small local model
 	// remembers to call a tool. Research them before the first model step and
 	// expose both the query and results through the normal tool timeline.
-	if needsInternetSearch(prompt) {
-		query := currentSearchQuery(prompt, time.Now())
+	// A subject that was already verified once does not need researching
+	// again — this is the whole point of keeping a verified store separate
+	// from ordinary run history. Checked before the search so a settled
+	// question costs nothing.
+	// The user answering an escalation follow-up with "that's correct" is the
+	// human-verification branch of the ladder: promote the claim they just
+	// confirmed so it is never re-researched.
+	if sessionRecord != nil && userConfirmedVerification(prompt) {
+		stored := ctxpkg.Store.GetMessages(sessionID)
+		history := make([]ctxMessage, len(stored))
+		for i, message := range stored {
+			history[i] = ctxMessage{Role: message.Role, Content: message.Content}
+		}
+		a.promoteLastAnswerToVerifiedFact(ctx, sessionRecord.ProjectID, history)
+		emit("fact_verified", map[string]any{"verified_by": "user"})
+	}
+
+	recalledFact, hasRecalledFact := "", false
+	if sessionRecord != nil && !directConversation {
+		recalledFact, hasRecalledFact = a.recallVerifiedFact(ctx, sessionRecord.ProjectID, modelPrompt)
+		if hasRecalledFact {
+			contextBuilder.WriteString(recalledFact)
+			emit("fact_recalled", map[string]any{"subject": factSubjectKey(modelPrompt)})
+		}
+		if approved := a.recallApprovedChanges(ctx, sessionRecord.ProjectID, modelPrompt); approved != "" {
+			contextBuilder.WriteString(approved)
+			emit("memory_recalled", map[string]any{"kind": "approved_changes"})
+		}
+	}
+
+	if needsInternetSearch(modelPrompt) && !hasRecalledFact {
+		query := currentSearchQuery(modelPrompt, time.Now())
 		webQuery = query
 		callID := "internet_preflight_" + runID
 		emit("tool_call", map[string]any{
 			"id": callID, "name": "search_internet", "input": map[string]any{"query": query, "max_results": 5},
 		})
-		results, err := searchCurrentEvent(ctx, query, 5)
-		if err != nil {
-			emit("tool_result", map[string]any{"id": callID, "name": "search_internet", "ok": false, "error": err.Error()})
-			contextBuilder.WriteString("Internet search was attempted but failed. State that current information could not be verified.\n")
-		} else if len(results) == 0 {
+		check := searchAllEngines(ctx, query, 5)
+		webConfidence = check.Confidence
+		webSources = check.IndependentDomains
+		if len(check.Results) == 0 {
 			emit("tool_result", map[string]any{
 				"id": callID, "name": "search_internet", "ok": false,
-				"error": "No relevant current-event results were found",
+				"error":  "No relevant results were found across any search engine",
+				"output": map[string]any{"engines_queried": check.EnginesQueried, "engines_failed": check.EnginesFailed},
 			})
-			contextBuilder.WriteString("The news search completed but found no relevant results. Say that the event could not be verified; do not substitute unrelated facts.\n")
+			contextBuilder.WriteString("The search completed but found no relevant results. Say that this could not be verified; do not substitute unrelated facts.\n")
 		} else {
-			webResults = results
+			for _, result := range check.Results {
+				webResults = append(webResults, result.internetSearchResult)
+			}
 			emit("tool_result", map[string]any{
 				"id": callID, "name": "search_internet", "ok": true,
-				"output": map[string]any{"query": query, "results": results},
+				"output": map[string]any{
+					"query": query, "results": check.Results,
+					"confidence": check.Confidence, "confidence_reason": check.Reason,
+					"independent_sources": check.IndependentDomains,
+					"engines_queried":     check.EnginesQueried,
+				},
 			})
+
 			var grounding strings.Builder
-			grounding.WriteString("WEB RESEARCH was run for the user's immediately preceding question. If these results actually answer it, use them and include source URLs — do not claim you lack real-time access or mention a training cutoff. If they don't (wrong topic, too generic, or otherwise not on point), say so plainly and either call search_internet yourself with a more specific query, or call ask_follow_up if you're not sure what would actually answer it — don't force an answer out of results that don't cover the question.\n")
-			for _, result := range results {
-				grounding.WriteString(fmt.Sprintf("- %s — %s — %s\n", result.Title, result.Description, result.URL))
+			grounding.WriteString(fmt.Sprintf(
+				"WEB RESEARCH was run for the user's immediately preceding question across %d search engines. Cross-source confidence: %s — %s\n",
+				len(check.EnginesQueried), check.Confidence, check.Reason))
+			switch check.Confidence {
+			case "high":
+				grounding.WriteString("Several independent sources agree, so you can answer from these results — cite the source URLs. Do not claim you lack real-time access or mention a training cutoff.\n")
+			case "medium":
+				grounding.WriteString("Only two independent sources back this, so answer if they clearly cover the question but say the corroboration is limited. If they don't cover it, call search_internet again with a more specific query.\n")
+			default:
+				grounding.WriteString("The evidence is too thin to state as fact. Do NOT present this as verified. Either call search_internet again with a more specific query, or call ask_follow_up to have the user confirm or point you at a better source.\n")
+			}
+			for _, result := range check.Results {
+				grounding.WriteString(fmt.Sprintf("- [%s] %s — %s — %s\n", result.Domain, result.Title, result.Description, result.URL))
 			}
 			webGroundingMessage = grounding.String()
 			contextBuilder.WriteString(webGroundingMessage)
@@ -197,7 +291,7 @@ func (a *Agent) Run(
 			dbHistory[i] = db.Message{Role: m.Role, Content: m.Content}
 		}
 
-		candidates, err := a.Resolver.Resolve(ctx, prompt, state, dbHistory)
+		candidates, err := a.Resolver.Resolve(ctx, modelPrompt, state, dbHistory)
 		if err != nil {
 			log.Printf("[agent] resolver error: %v", err)
 		}
@@ -217,7 +311,7 @@ func (a *Agent) Run(
 			}
 			contextBuilder.WriteString(fmt.Sprintf("Resolved: %s%s (confidence: %s)\n", best.Path, sym, best.Confidence))
 		}
-		knowledgeCandidates, err = a.Resolver.RetrieveKnowledge(ctx, prompt, state, candidates)
+		knowledgeCandidates, err = a.Resolver.RetrieveKnowledge(ctx, modelPrompt, state, candidates)
 		if err != nil {
 			log.Printf("[agent] knowledge retrieval error: %v", err)
 		}
@@ -248,10 +342,6 @@ func (a *Agent) Run(
 
 	// 4. Load full message history from DB and convert to OllamaMessage format
 	dbMessages := ctxpkg.Store.GetMessages(sessionID)
-	contextState := state
-	if directConversation {
-		contextState = editor.EditorState{}
-	}
 	modelContext := ctxpkg.BuildModelContext(ctxpkg.BuildInput{Model: model, State: contextState, History: dbMessages, Candidates: knowledgeCandidates})
 	if modelContext.EditorAndKnowledge != "" {
 		contextBuilder.WriteString(modelContext.EditorAndKnowledge)
@@ -276,12 +366,10 @@ func (a *Agent) Run(
 	}
 	messages = append(messages, OllamaMessage{Role: "system", Content: systemContent})
 
-	// Small local models answer a bare "explain" or "fix this" literally
-	// instead of inferring "the file I have open" the way a larger model
-	// would. Anchor the current turn to the active file by name so the model
-	// has an explicit target — this only changes what's sent to Ollama, never
-	// what's stored in the session or shown in the chat UI.
-	anchoredPrompt := anchorPromptToActiveFile(prompt, contextState)
+	// modelPrompt is already anchored to the active file (and, for a real
+	// agent turn, rephrased) above — this only changes what's sent to
+	// Ollama, never what's stored in the session or shown in the chat UI.
+	anchoredPrompt := modelPrompt
 	for _, m := range modelContext.History {
 		content := m.Content
 		if m.Role == "user" && content == prompt {
@@ -335,6 +423,7 @@ func (a *Agent) Run(
 	stepErrored := false
 	runEmit := func(event string, data any) { emit(event, data) }
 	for {
+		before := len(messages)
 		done, newMessages, err := run.Step(ctx, messages, a.Registry, a.OllamaURL, runEmit)
 		if err != nil {
 			log.Printf("[agent] run %s step %d error: %v", runID, run.Steps, err)
@@ -345,11 +434,8 @@ func (a *Agent) Run(
 		messages = newMessages
 
 		if done {
-			for i := len(messages) - 1; i >= 0; i-- {
-				if messages[i].Role == "assistant" {
-					finalContent = messages[i].Content
-					break
-				}
+			if reply, ok := newAssistantReply(before, messages); ok {
+				finalContent = reply
 			}
 			break
 		}
@@ -377,6 +463,7 @@ func (a *Agent) Run(
 		// tool calls — to reach a real final answer, exactly like the main
 		// loop above. run.Step's own MaxSteps check bounds this.
 		for {
+			before := len(messages)
 			done, newMessages, err := run.Step(ctx, messages, a.Registry, a.OllamaURL, runEmit)
 			if err != nil {
 				log.Printf("[agent] run %s corrective retry error: %v", runID, err)
@@ -385,11 +472,12 @@ func (a *Agent) Run(
 			}
 			messages = newMessages
 			if done {
-				for i := len(messages) - 1; i >= 0; i-- {
-					if messages[i].Role == "assistant" {
-						finalContent = messages[i].Content
-						break
-					}
+				// Only overwrite finalContent if this retry actually produced
+				// something new — if it aborted, the original (narrated)
+				// response from the main loop above is a better fallback
+				// than blanking it out.
+				if reply, ok := newAssistantReply(before, messages); ok {
+					finalContent = reply
 				}
 				break
 			}
@@ -410,6 +498,7 @@ func (a *Agent) Run(
 				"most relevant tool now, or call ask_follow_up if you genuinely need the user's input. Do not explain more — just act.",
 		})
 		for {
+			before := len(messages)
 			done, newMessages, err := run.Step(ctx, messages, a.Registry, a.OllamaURL, runEmit)
 			if err != nil {
 				log.Printf("[agent] run %s thinking-budget retry error: %v", runID, err)
@@ -418,19 +507,34 @@ func (a *Agent) Run(
 			}
 			messages = newMessages
 			if done {
-				for i := len(messages) - 1; i >= 0; i-- {
-					if messages[i].Role == "assistant" {
-						finalContent = messages[i].Content
-						break
-					}
+				// Only overwrite finalContent if this retry actually produced
+				// something new. If it aborted (budget exceeded again), leave
+				// finalContent as whatever it already was — which, if the
+				// very first attempt also aborted with nothing new, is "" —
+				// so the graceful timeout message right below actually fires,
+				// instead of accidentally inheriting a stale assistant reply
+				// from an earlier turn in this same conversation (live bug:
+				// asking "what is today's date" twice in one session echoed
+				// the first answer back as if it were a fresh one, because
+				// the old backward-scan-for-any-assistant-message logic
+				// doesn't distinguish "message from this attempt" from
+				// "message from three turns ago").
+				if reply, ok := newAssistantReply(before, messages); ok {
+					finalContent = reply
 				}
 				break
 			}
 		}
-		if run.ThinkingBudgetExceeded && finalContent == "" {
-			finalContent = "I'm having trouble reaching a clear answer for this without taking too long. Could you rephrase the question or break it into a smaller one?"
-			emit("replace_content", map[string]any{"text": finalContent})
-		}
+	}
+	// Checked unconditionally (not nested in the retry block above): if the
+	// very first attempt exceeded budget but run.Steps had already reached
+	// run.MaxSteps, the retry never ran at all, yet run.ThinkingBudgetExceeded
+	// is still true and finalContent is still empty — this must still produce
+	// a graceful message rather than fall through to the search-grounding
+	// check below with nothing to show.
+	if run.ThinkingBudgetExceeded && finalContent == "" {
+		finalContent = "I'm having trouble reaching a clear answer for this without taking too long. Could you rephrase the question or break it into a smaller one?"
+		emit("replace_content", map[string]any{"text": finalContent})
 	}
 
 	// run.Paused is excluded for the same reason as the corrective-retry check
@@ -440,10 +544,44 @@ func (a *Agent) Run(
 	// itself called search_internet again (per the grounding message's own
 	// instruction to refine the query rather than force an answer), that's
 	// the model actively working the problem, not something to override with
-	// stale results from the first, already-rejected search.
-	if !stepErrored && len(webResults) > 0 && !run.Paused && !anyToolMessage(messages) && !responseGroundedInSuccessfulSearch(finalContent, webResults) {
+	// stale results from the first, already-rejected search. run.ThinkingBudgetExceeded
+	// is excluded because the message right above is itself an honest,
+	// deliberately-chosen final answer (a timeout notice) — not a dodge to
+	// correct with fabricated "grounded" content pasted over it.
+	if shouldApplyGroundingFallback(stepErrored, run.ThinkingBudgetExceeded, run.Paused, webResults, anyToolMessage(messages), finalContent) {
 		finalContent = groundedSearchFallback(webQuery, webResults)
 		emit("replace_content", map[string]any{"text": finalContent})
+	}
+
+	// Final rung of the escalation ladder. The search itself already tried to
+	// resolve uncertainty (multiple engines, cross-checked against each
+	// other); if the evidence still didn't corroborate, the honest move is to
+	// hand the decision to the user rather than assert a weakly-sourced claim
+	// as fact. The user can confirm it (which promotes it to a verified
+	// memory) or send it back for another search with better terms.
+	// A cross-source-verified answer is worth keeping: the next time this
+	// subject comes up, recallVerifiedFact short-circuits the whole search.
+	// Only "high" qualifies — several independent sources agreeing is the
+	// bar, because anything weaker is exactly the false corroboration this
+	// pipeline exists to catch.
+	if !stepErrored && !run.Paused && webConfidence == "high" && strings.TrimSpace(finalContent) != "" &&
+		sessionRecord != nil && !responseHonestlyReportsIrrelevantResults(finalContent) {
+		a.rememberVerifiedFact(ctx, sessionRecord.ProjectID, modelPrompt, finalContent, webSources, "cross_source")
+		emit("fact_verified", map[string]any{"sources": webSources, "verified_by": "cross_source"})
+	}
+
+	if shouldEscalateForVerification(stepErrored, webConfidence, run.Paused, finalContent) {
+		emit("follow_up", map[string]any{
+			"question": fmt.Sprintf("I could only find weak corroboration for this (%s). I don't want to state it as fact without checking — how should I proceed?",
+				strings.ToLower(webConfidenceReason(webConfidence))),
+			"options": []string{
+				"That's correct — save it as verified",
+				"Search again with better terms",
+				"Drop it, I'll find out myself",
+			},
+			"input_type": "select",
+		})
+		run.Paused = true
 	}
 
 	// 7. Save the final assistant response to DB.
@@ -565,6 +703,21 @@ func anchorPromptToActiveFile(prompt string, state editor.EditorState) string {
 // used to catch a model that responded with narration ("please confirm the
 // installation...") instead of actually calling create_file/run_command/etc.
 var actionRequestPattern = regexp.MustCompile(`(?i)\b(create|make|add|install|build|generate|write|implement|delete|remove|rename|fix|update|modify|refactor|scaffold|set\s?up|run|execute|initialize|init)\b`)
+
+// requestsExplanationPattern matches prompts that ask to understand existing
+// code rather than change it (explain, describe, review, analyze, "what does
+// this do"). rephrasePrompt is skipped for these: live-tested against
+// rephraserModel, it doesn't just rewrite this class of request — it answers
+// it, confidently fabricating a description of code it has never actually
+// seen (e.g. inventing a whole authentication flow for a file it was only
+// given the name of). Rewriting an action request just rephrases what to do;
+// rewriting an explain request risks handing the real model a fabricated
+// "fact" about the codebase as if it were established truth.
+var requestsExplanationPattern = regexp.MustCompile(`(?i)\b(explain|describe|review|analy[sz]\w*|understand|walk\s?me\s?through|what\s+does|how\s+does|what\s+is\s+this|summari[sz]\w*)\b`)
+
+func promptRequestsExplanation(prompt string) bool {
+	return requestsExplanationPattern.MatchString(prompt)
+}
 
 func promptRequestsAction(prompt string) bool {
 	return actionRequestPattern.MatchString(prompt)
@@ -817,6 +970,63 @@ func responseHonestlyReportsIrrelevantResults(content string) bool {
 	return false
 }
 
+// shouldApplyGroundingFallback decides whether finalContent must be replaced
+// with groundedSearchFallback's canned, results-citing answer. It must stay
+// false whenever finalContent is already an honest final answer chosen
+// deliberately elsewhere — a transport error (stepErrored), a thinking-budget
+// timeout notice (run.ThinkingBudgetExceeded), a real clarifying question
+// (run.Paused), or the model actively re-searching itself (anyToolMsg) — since
+// overriding any of those pastes a fabricated "I found current reporting..."
+// answer over a message that was already correct for its situation.
+// newAssistantReply reports the assistant's reply from a Step call that just
+// returned done=true, but only if that call actually appended something —
+// i.e. len(messages) grew past beforeLen and the new tail message is the
+// assistant's. A Step call that aborts (thinking-budget exceeded) returns
+// messages completely unchanged, so beforeLen guards against mistaking an
+// aborted attempt for a real answer by scanning backward into messages that
+// were already there — which, in a multi-turn conversation, can be a
+// perfectly real assistant reply from several turns ago rather than
+// anything from this attempt.
+func newAssistantReply(beforeLen int, messages []OllamaMessage) (string, bool) {
+	if len(messages) <= beforeLen {
+		return "", false
+	}
+	last := messages[len(messages)-1]
+	if last.Role != "assistant" {
+		return "", false
+	}
+	return last.Content, true
+}
+
+// shouldEscalateForVerification decides whether to hand a weakly-sourced
+// answer to the user instead of asserting it. Only fires when a search
+// actually ran and came back poorly corroborated ("low"), the run otherwise
+// succeeded, and the model produced a confident-sounding answer anyway.
+// Excluded cases: an errored run (nothing to verify), an answer the model
+// already hedged or declined to give (it made the honest call itself), and a
+// run already paused on its own ask_follow_up (two questions at once).
+func shouldEscalateForVerification(stepErrored bool, webConfidence string, paused bool, finalContent string) bool {
+	if stepErrored || paused || webConfidence != "low" || strings.TrimSpace(finalContent) == "" {
+		return false
+	}
+	return !responseHonestlyReportsIrrelevantResults(finalContent)
+}
+
+func webConfidenceReason(confidence string) string {
+	switch confidence {
+	case "low":
+		return "not enough independent sources agreed"
+	case "medium":
+		return "only two independent sources agreed"
+	default:
+		return "the sources were inconclusive"
+	}
+}
+
+func shouldApplyGroundingFallback(stepErrored, thinkingBudgetExceeded, paused bool, webResults []internetSearchResult, anyToolMsg bool, finalContent string) bool {
+	return !stepErrored && !thinkingBudgetExceeded && len(webResults) > 0 && !paused && !anyToolMsg && !responseGroundedInSuccessfulSearch(finalContent, webResults)
+}
+
 func responseGroundedInSuccessfulSearch(content string, results []internetSearchResult) bool {
 	if responseIgnoredSuccessfulSearch(content) {
 		return false
@@ -869,6 +1079,7 @@ var persistedTimelineEvents = map[string]bool{
 	"context_resolved":  true,
 	"context_candidate": true,
 	"context_built":     true,
+	"prompt_rephrased":  true,
 }
 
 // mergeThinkingToken folds a thinking_token event into the previous logged

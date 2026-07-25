@@ -29,6 +29,20 @@ func (d *DB) CreatePatch(ctx context.Context, patch Patch) error {
 	return err
 }
 
+// CreateAppliedPatch records a file change that a run_terminal command
+// already wrote to disk directly (no staging step, unlike CreatePatch).
+// Inserting it straight into the "applied" status reuses the existing
+// PatchHandler.Rollback endpoint as-is for "undo this terminal change": it
+// already knows how to revert an applied patch back to OriginalContent.
+func (d *DB) CreateAppliedPatch(ctx context.Context, patch Patch) error {
+	if patch.ID == "" {
+		patch.ID = NewID()
+	}
+	_, err := d.ExecContext(ctx, `INSERT INTO patches(id,session_id,run_id,file_path,operation,diff,new_content,original_content,rename_to,status,applied_at)
+		VALUES(?,?,?,?,?,?,?,?,?,'applied',CURRENT_TIMESTAMP)`, patch.ID, patch.SessionID, patch.RunID, patch.FilePath, patch.Operation, patch.Diff, patch.NewContent, patch.OriginalContent, nullableString(patch.RenameTo))
+	return err
+}
+
 func (d *DB) GetPatch(ctx context.Context, id string) (Patch, error) {
 	var patch Patch
 	err := d.QueryRowContext(ctx, `SELECT id,session_id,run_id,file_path,operation,COALESCE(diff,''),COALESCE(new_content,''),

@@ -24,6 +24,20 @@ const DEFAULT_EDITOR_SETTINGS = {
   matchBrackets: 'always', // 'always', 'never', 'near'
 };
 
+// --- Agent Settings ---
+// maxThinkingTokens mirrors agent/settings.go's defaultMaxThinkingTokens —
+// how many thinking tokens a single generation step may spend before the
+// backend cuts it off as a runaway reasoning loop. Exposed here so it can be
+// tuned from the Settings page without a server restart.
+const DEFAULT_AGENT_SETTINGS = {
+  maxThinkingTokens: 1200,
+  // Mirrors agent/settings.go's defaultForceUnloadAfterChats — periodically
+  // forces Ollama to unload the model after this many chat requests, even
+  // under continuous back-to-back use where a plain idle timeout would
+  // never fire. 0 disables this and relies on keep_alive alone.
+  forceUnloadAfterChats: 100,
+};
+
 export function AppStateProvider({ children }) {
   const navigate = useNavigate();
 
@@ -32,6 +46,7 @@ export function AppStateProvider({ children }) {
   const [fontSettingsOpen, setFontSettingsOpen] = useState(false);
   const [fontSettings, setFontSettings] = useState(DEFAULT_FONT_SETTINGS);
   const [editorSettings, setEditorSettings] = useState(DEFAULT_EDITOR_SETTINGS);
+  const [agentSettings, setAgentSettings] = useState(DEFAULT_AGENT_SETTINGS);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
 
   const [workspacePickerMode, setWorkspacePickerMode] = useState(null);
@@ -40,7 +55,7 @@ export function AppStateProvider({ children }) {
   const [activeProject, setActiveProject] = useState(null);
   const [requestedSessionId, setRequestedSessionId] = useState('');
   const [aiPreview, setAiPreview] = useState(null);
-  const [layout, setLayout] = useState({ folders: true, code: true, ai: true });
+  const [layout, setLayout] = useState({ folders: true, code: true, ai: true, terminal: false });
   const [indexStatus, setIndexStatus] = useState({
     status: 'idle', processed: 0, total: 0, skipped: 0, errors: 0,
     enrichmentStatus: 'idle', enrichmentRemaining: 0, enrichmentPath: '',
@@ -60,6 +75,16 @@ export function AppStateProvider({ children }) {
   const [chatWidth, setChatWidth] = useState(360);
   const sidebarStartRef = useRef(260);
   const chatStartRef = useRef(360);
+  const [terminalHeight, setTerminalHeight] = useState(280);
+  const terminalStartRef = useRef(280);
+  // Cross-component bridge: ChatPanel pushes the AI agent's own run_terminal
+  // activity here so TerminalPanel (a separate component, no direct SSE
+  // access of its own) can print it into the same visible terminal, clearly
+  // marked apart from the user's own interactive shell.
+  const [terminalActivity, setTerminalActivity] = useState([]);
+  const pushTerminalActivity = useCallback(entry => {
+    setTerminalActivity(prev => [...prev, { ...entry, id: `${Date.now()}-${Math.random()}` }]);
+  }, []);
 
   const activeTheme = getStudioTheme(themeID);
   const studioStyle = themeVariables(activeTheme);
@@ -95,6 +120,7 @@ export function AppStateProvider({ children }) {
         if (data.themeID) setThemeID(data.themeID);
         if (data.fontSettings) setFontSettings({ ...DEFAULT_FONT_SETTINGS, ...data.fontSettings });
         if (data.editorSettings) setEditorSettings({ ...DEFAULT_EDITOR_SETTINGS, ...data.editorSettings });
+        if (data.agentSettings) setAgentSettings({ ...DEFAULT_AGENT_SETTINGS, ...data.agentSettings });
         setSettingsLoaded(true);
       })
       .catch(err => {
@@ -104,23 +130,23 @@ export function AppStateProvider({ children }) {
     return () => { cancelled = true; };
   }, []);
 
-  const saveSettingsToAPI = (theme, font, editor) => {
+  const saveSettingsToAPI = (theme, font, editor, agentPrefs) => {
     fetch('/api/settings', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ themeID: theme, fontSettings: font, editorSettings: editor })
+      body: JSON.stringify({ themeID: theme, fontSettings: font, editorSettings: editor, agentSettings: agentPrefs })
     }).catch(console.error);
   };
 
   const selectTheme = id => {
     setThemeID(id);
-    saveSettingsToAPI(id, fontSettings, editorSettings);
+    saveSettingsToAPI(id, fontSettings, editorSettings, agentSettings);
   };
 
   const updateFontSettings = patch => {
     setFontSettings(prev => {
       const next = { ...prev, ...patch };
-      saveSettingsToAPI(themeID, next, editorSettings);
+      saveSettingsToAPI(themeID, next, editorSettings, agentSettings);
       return next;
     });
   };
@@ -128,7 +154,15 @@ export function AppStateProvider({ children }) {
   const updateEditorSettings = (updates) => {
     setEditorSettings(prev => {
       const next = { ...prev, ...updates };
-      saveSettingsToAPI(themeID, fontSettings, next);
+      saveSettingsToAPI(themeID, fontSettings, next, agentSettings);
+      return next;
+    });
+  };
+
+  const updateAgentSettings = (updates) => {
+    setAgentSettings(prev => {
+      const next = { ...prev, ...updates };
+      saveSettingsToAPI(themeID, fontSettings, editorSettings, next);
       return next;
     });
   };
@@ -241,6 +275,11 @@ export function AppStateProvider({ children }) {
   }, [activeProject?.id]);
 
   async function selectProject(proj) {
+    // Reopening the project the user is already in (e.g. Home -> same
+    // workspace) should land them back where they were, not wipe their open
+    // tabs and force a rescan — only a genuine switch to a different project
+    // needs that reset.
+    const isSameProject = activeProject?.id === proj.id;
     try {
       const res = await fetch('/api/workspace', {
         method: 'POST',
@@ -248,12 +287,14 @@ export function AppStateProvider({ children }) {
         body: JSON.stringify({ project_id: proj.id, path: proj.path })
       });
       if (res.ok) {
-        setIndexStatus({ status: 'scanning', processed: 0, total: 0, skipped: 0, errors: 0 });
-        setScanNotificationMinimized(false);
         setActiveProject(proj);
-        setRefreshTrigger(prev => prev + 1);
-        setOpenFiles([]);
-        setActiveTab('');
+        if (!isSameProject) {
+          setIndexStatus({ status: 'scanning', processed: 0, total: 0, skipped: 0, errors: 0 });
+          setScanNotificationMinimized(false);
+          setRefreshTrigger(prev => prev + 1);
+          setOpenFiles([]);
+          setActiveTab('');
+        }
       }
     } catch (e) { console.error(e); }
   }
@@ -476,6 +517,12 @@ export function AppStateProvider({ children }) {
     setChatWidth(newW);
   }, []);
 
+  const handleTerminalDrag = useCallback((currentY, startY) => {
+    const delta = startY - currentY;
+    const newH = Math.max(120, Math.min(700, terminalStartRef.current + delta));
+    setTerminalHeight(newH);
+  }, []);
+
   const toggleLayout = (pane) => {
     setLayout(current => ({ ...current, [pane]: !current[pane] }));
   };
@@ -559,6 +606,7 @@ export function AppStateProvider({ children }) {
     themeID, themeSettingsOpen, setThemeSettingsOpen, selectTheme,
     fontSettingsOpen, setFontSettingsOpen, fontSettings, updateFontSettings,
     editorSettings, updateEditorSettings,
+    agentSettings, updateAgentSettings,
     activeTheme, studioStyle, studioClassName, antTheme,
     workspacePickerMode, setWorkspacePickerMode, handleWorkspacePickerSelect,
     projects, projectsLoaded, activeProject, selectProject, switchToProject,
@@ -578,6 +626,8 @@ export function AppStateProvider({ children }) {
     openFile, openFileFromRoute, handleTabChange, handleTabEdit,
     handleFileRenamed, handleFileDeleted, updateCursorAndSync,
     sidebarWidth, chatWidth, handleSidebarDrag, handleChatDrag, sidebarStartRef, chatStartRef,
+    terminalHeight, handleTerminalDrag, terminalStartRef,
+    terminalActivity, pushTerminalActivity,
     handleOpenConversation, handleNavigate,
   };
 

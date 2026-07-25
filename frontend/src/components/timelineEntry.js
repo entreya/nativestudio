@@ -11,6 +11,7 @@ import {
   DiffOutlined,
   CodeOutlined,
   ToolOutlined,
+  TranslationOutlined,
   CloseCircleFilled,
   LoadingOutlined,
 } from '@ant-design/icons';
@@ -37,6 +38,8 @@ const TOOL_ICONS = {
   create_file: FileAddOutlined,
   delete_file: DeleteOutlined,
   run_command: CodeOutlined,
+  run_terminal: CodeOutlined,
+  rename_symbol: EditOutlined,
 };
 
 export function iconFor(entry) {
@@ -45,6 +48,7 @@ export function iconFor(entry) {
   if (entry.kind === 'thinking') return BulbOutlined;
   if (entry.kind === 'context') return SearchOutlined;
   if (entry.kind === 'step') return BulbOutlined;
+  if (entry.kind === 'rephrase') return TranslationOutlined;
   return TOOL_ICONS[entry.name] || ToolOutlined;
 }
 

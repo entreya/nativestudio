@@ -93,13 +93,14 @@ type AgentRun struct {
 // DefaultMaxSteps is the maximum number of tool-call iterations before the agent stops.
 const DefaultMaxSteps = 15
 
-// maxThinkingTokens caps how many thinking chunks a single generation may
-// stream before Step aborts it as a runaway reasoning loop. Chosen from a
-// live-reproduced pathological case (8,792 tokens / ~7 minutes, never
-// concluding) versus normal multi-paragraph reasoning observed elsewhere in
-// the same testing (a few hundred tokens) — generous enough for real
-// reasoning, well short of the failure mode.
-const maxThinkingTokens = 1200
+// defaultMaxThinkingTokens caps how many thinking chunks a single generation
+// may stream before Step aborts it as a runaway reasoning loop, unless the
+// user has overridden it from the Settings page (currentMaxThinkingTokens,
+// agent/settings.go). Chosen from a live-reproduced pathological case (8,792
+// tokens / ~7 minutes, never concluding) versus normal multi-paragraph
+// reasoning observed elsewhere in the same testing (a few hundred tokens) —
+// generous enough for real reasoning, well short of the failure mode.
+const defaultMaxThinkingTokens = 1200
 
 // ollamaKeepAlive bounds how long Ollama keeps a model resident in memory
 // after the last request (Ollama's own default is 5 minutes). On a 16GB
@@ -126,8 +127,18 @@ func (run *AgentRun) Step(
 		emit("error", map[string]any{"message": "max_steps_reached"})
 		return true, messages, nil
 	}
+	// Incremented here, on entry, rather than on a successful return at the
+	// bottom of Step: a step that gets cut short (thinking-budget exceeded,
+	// a corrective nudge retry) must still consume a step number. Otherwise
+	// two separate Step calls emit "agent_step" with the same number — the
+	// frontend timeline keys entries by step number, so a repeat collides
+	// (duplicate React key, one entry silently never resolves out of
+	// "running") — and, separately, a run that kept hitting an aborted step
+	// without ever incrementing could retry forever without ever tripping
+	// the MaxSteps limit.
+	run.Steps++
 	if !run.Direct {
-		emit("agent_step", map[string]any{"step": run.Steps + 1, "message": "Planning the next action"})
+		emit("agent_step", map[string]any{"step": run.Steps, "message": "Planning the next action"})
 	}
 
 	// Bound the Ollama round trip so a wedged model/server can't hold the SSE
@@ -141,7 +152,7 @@ func (run *AgentRun) Step(
 		"model":      run.Model,
 		"messages":   messages,
 		"stream":     true,
-		"keep_alive": ollamaKeepAlive,
+		"keep_alive": nextChatKeepAlive(),
 	}
 	if !run.Direct {
 		ollamaReq["tools"] = registry.OllamaDefinitions()
@@ -196,6 +207,7 @@ func (run *AgentRun) Step(
 	var toolCalls []OllamaToolCall
 	thinkingChunks := 0
 	budgetExceeded := false
+	thinkingBudget := currentMaxThinkingTokens()
 
 	scanner := bufio.NewScanner(resp.Body)
 	// Increase buffer size for large responses
@@ -253,7 +265,7 @@ func (run *AgentRun) Step(
 		// tool call has started arriving, the model has already committed to
 		// an answer and cutting it off would just produce a truncated result
 		// instead of a runaway one.
-		if thinkingChunks > maxThinkingTokens && contentBuf.Len() == 0 && len(toolCalls) == 0 {
+		if thinkingChunks > thinkingBudget && contentBuf.Len() == 0 && len(toolCalls) == 0 {
 			budgetExceeded = true
 			cancel()
 			break
@@ -379,10 +391,14 @@ func (run *AgentRun) Step(
 			}
 		}
 
-		if found && tool.Safety >= RequiresApproval && result.OK {
+		// Emitted off the result's own "staged" flag rather than the tool's
+		// declared Safety tier: run_terminal is Safe (most calls execute
+		// instantly) but stages destructive commands through this exact same
+		// path, so it needs the same command_staged event run_command gets.
+		if found && result.OK {
 			if output, ok := result.Content.(map[string]any); ok {
 				staged, _ := output["staged"].(bool)
-				if staged && tc.Function.Name == "run_command" {
+				if staged && (tc.Function.Name == "run_command" || tc.Function.Name == "run_terminal") {
 					emit("command_staged", map[string]any{
 						"run_id": output["run_id"], "command": output["command"], "cwd": output["cwd"],
 					})
@@ -391,6 +407,15 @@ func (run *AgentRun) Step(
 						"patch_id": output["patch_id"], "file_path": output["file_path"],
 						"operation": output["operation"], "diff": output["diff"],
 					})
+				}
+				// run_terminal's non-destructive path already wrote these
+				// changes to disk before this result came back — surfaced
+				// as "applied" (Keep/Undo) rather than "staged" (Approve/
+				// Reject), since there's nothing left to approve.
+				if changes, ok := output["file_changes"].([]map[string]any); ok {
+					for _, change := range changes {
+						emit("patch_applied", change)
+					}
 				}
 			}
 		}
@@ -413,7 +438,6 @@ func (run *AgentRun) Step(
 		messages = append(messages, toolMsg)
 	}
 
-	run.Steps++
 	return false, messages, nil
 }
 

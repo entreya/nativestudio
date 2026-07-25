@@ -25,6 +25,7 @@ import { iconFor, colorFor, workingPlaceholderEntry } from './timelineEntry';
 import CodeSnippet from './CodeSnippet';
 import PatchReview from './PatchReview';
 import CommandReview from './CommandReview';
+import AppliedPatchReview from './AppliedPatchReview';
 
 const { Text } = Typography;
 const { TextArea } = Input;
@@ -159,6 +160,12 @@ function replayTimeline(events) {
       case 'context_built':
         timeline = withContextEntry(timeline, entry => ({ ...entry, status: 'done', tokens: data.tokens, budget: data.budget }));
         break;
+      case 'prompt_rephrased':
+        timeline = [...closeRunningEntries(timeline), {
+          id: `rephrase-${timeline.length}`, kind: 'rephrase', status: 'done',
+          original: data.original, rephrased: data.rephrased,
+        }];
+        break;
       default:
         break;
     }
@@ -234,6 +241,7 @@ export default function ChatPanel({
   editorContext,
   requestedSessionId,
   onFilesChanged,
+  onTerminalActivity,
 }) {
   // models: plain name strings shown in the dropdown.
   // modelCapMap: name → thinking_capable flag, populated from /api/models.
@@ -262,6 +270,7 @@ export default function ChatPanel({
   const [editingMessage, setEditingMessage] = useState(null);
   const [editDraft, setEditDraft] = useState('');
   const [pendingPatches, setPendingPatches] = useState([]);
+  const [appliedPatches, setAppliedPatches] = useState([]);
   const [pendingCommands, setPendingCommands] = useState([]);
 
   const [agentRunning, setAgentRunning] = useState(false);
@@ -509,6 +518,8 @@ export default function ChatPanel({
               setPendingPatches(previous => previous.some(patch => patch.patch_id === data.patch_id) ? previous : [...previous, data]);
             } else if (type === 'command_staged') {
               setPendingCommands(previous => previous.some(cmd => cmd.run_id === data.run_id) ? previous : [...previous, data]);
+            } else if (type === 'patch_applied') {
+              setAppliedPatches(previous => previous.some(patch => patch.patch_id === data.patch_id) ? previous : [...previous, data]);
             } else if (type === 'session_metadata') {
               setActiveSession(session => session?.id === data.session_id ? { ...session, title: data.title, summary: data.summary } : session);
               setSessions(items => items.map(session => session.id === data.session_id ? { ...session, title: data.title, summary: data.summary } : session));
@@ -572,6 +583,9 @@ export default function ChatPanel({
                   lastMsg.timeline = lastMsg.timeline.map(entry => entry.id === data.id
                     ? { ...entry, status: data.ok ? 'done' : 'error', output: data.output, error: data.error }
                     : entry);
+                  if (data.name === 'run_terminal' && data.ok && data.output?.command) {
+                    onTerminalActivity?.({ command: data.output.command, output: data.output.output });
+                  }
                   break;
 
                 case 'context_resolved':
@@ -594,6 +608,13 @@ export default function ChatPanel({
                   lastMsg.timeline = withContextEntry(lastMsg.timeline, entry => ({
                     ...entry, status: 'done', tokens: data.tokens, budget: data.budget,
                   }));
+                  break;
+
+                case 'prompt_rephrased':
+                  lastMsg.timeline = [...closeRunningEntries(lastMsg.timeline), {
+                    id: `rephrase-${lastMsg.timeline.length}`, kind: 'rephrase', status: 'done',
+                    original: data.original, rephrased: data.rephrased,
+                  }];
                   break;
 
                 case 'follow_up':
@@ -737,6 +758,22 @@ export default function ChatPanel({
   const handleRejectPatch = patchID => resolvePatches('reject', [patchID]);
   const handleApproveAll = () => resolvePatches('approve', pendingPatches.map(patch => patch.patch_id));
   const handleRejectAll = () => resolvePatches('reject', pendingPatches.map(patch => patch.patch_id));
+
+  // A run_terminal change is already on disk by the time it shows up here —
+  // Keep just dismisses the notice (nothing left to write), Undo reverts it
+  // via the same rollback endpoint an applied create_file/apply_patch change
+  // already uses.
+  const handleKeepAppliedPatch = async patchID => {
+    setAppliedPatches(previous => previous.filter(patch => patch.patch_id !== patchID));
+  };
+  const handleUndoAppliedPatch = async patchID => {
+    const response = await fetch(`/api/patches/${patchID}/rollback`, { method: 'POST' });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.message || 'Could not undo this change');
+    setAppliedPatches(previous => previous.filter(patch => patch.patch_id !== patchID));
+    onFilesChanged?.();
+    await window.reloadCurrentFile?.();
+  };
 
   const resolveCommands = async (action, runIDs) => {
     if (!activeSession || runIDs.length === 0) return;
@@ -1055,6 +1092,9 @@ export default function ChatPanel({
           )}
           {pendingCommands.length > 0 && !agentRunning && (
             <CommandReview commands={pendingCommands} onApprove={handleApproveCommand} onReject={handleRejectCommand} onApproveAll={handleApproveAllCommands} onRejectAll={handleRejectAllCommands} />
+          )}
+          {appliedPatches.length > 0 && !agentRunning && (
+            <AppliedPatchReview patches={appliedPatches} onKeep={handleKeepAppliedPatch} onUndo={handleUndoAppliedPatch} />
           )}
           <div ref={messagesEndRef} />
         </div>

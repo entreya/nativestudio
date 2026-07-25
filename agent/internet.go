@@ -22,13 +22,15 @@ type internetSearchResult struct {
 // when the answer is not present in its knowledge or the workspace.
 func registerInternetSearchTool(r *Registry) {
 	r.Register(&Tool{
-		Name:        "search_internet",
-		Description: "Search the public internet for current or unfamiliar information. Use this before guessing when the user's request depends on facts not available in the workspace or your knowledge.",
+		Name: "search_internet",
+		Description: "Search the public internet across several engines at once and cross-check what they say. Returns results tagged with their publisher, plus a confidence rating based on how many INDEPENDENT sources agree. " +
+			"Use this before guessing when a request depends on facts not in the workspace or your knowledge. Check the returned confidence: 'high' means several independent sources agree and you can answer from it; " +
+			"'medium' means only two sources agree; 'low' means the evidence is too thin to state as fact — refine the query and search again, or ask the user to verify.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"query":       map[string]any{"type": "string", "description": "A focused search query."},
-				"max_results": map[string]any{"type": "integer", "description": "Number of results, from 1 to 8. Defaults to 5."},
+				"max_results": map[string]any{"type": "integer", "description": "Results per engine, from 1 to 8. Defaults to 5."},
 			},
 			"required": []string{"query"},
 		},
@@ -43,11 +45,22 @@ func registerInternetSearchTool(r *Registry) {
 			if raw, ok := input["max_results"].(float64); ok && raw >= 1 && raw <= 8 {
 				limit = int(raw)
 			}
-			results, err := searchInternet(ctx, query, limit)
-			if err != nil {
-				return ToolResult{OK: false, Error: err.Error()}, nil
+
+			check := searchAllEngines(ctx, query, limit)
+			if len(check.Results) == 0 {
+				return ToolResult{OK: false, Error: "no results found across any search engine", Content: map[string]any{
+					"query": query, "engines_queried": check.EnginesQueried, "engines_failed": check.EnginesFailed,
+				}}, nil
 			}
-			return ToolResult{OK: true, Content: map[string]any{"query": query, "results": results}}, nil
+			return ToolResult{OK: true, Content: map[string]any{
+				"query":               query,
+				"results":             check.Results,
+				"confidence":          check.Confidence,
+				"confidence_reason":   check.Reason,
+				"independent_sources": check.IndependentDomains,
+				"engines_queried":     check.EnginesQueried,
+				"engines_failed":      check.EnginesFailed,
+			}}, nil
 		},
 	})
 }
@@ -133,6 +146,7 @@ func filterRelevantResults(query string, candidates []internetSearchResult) []in
 	if len(tokens) == 0 {
 		return candidates
 	}
+	core := coreSearchTokens(query)
 	minimumMatches := 2
 	if len(tokens) == 1 {
 		minimumMatches = 1
@@ -140,6 +154,16 @@ func filterRelevantResults(query string, candidates []internetSearchResult) []in
 	results := make([]internetSearchResult, 0, len(candidates))
 	for _, candidate := range candidates {
 		haystack := strings.ToLower(candidate.Title + " " + candidate.Description)
+
+		// A result must name the actual subject. Without this, a document
+		// sharing only generic words with the query counts as a match, and
+		// then as an independent corroborating source — manufacturing
+		// agreement between documents that have nothing to do with each
+		// other. Verified live against the "latest PHP release" case.
+		if len(core) > 0 && !matchesAnyToken(core, haystack) {
+			continue
+		}
+
 		matches := 0
 		for _, token := range tokens {
 			if fuzzyTokenMatch(token, haystack) {
@@ -153,7 +177,24 @@ func filterRelevantResults(query string, candidates []internetSearchResult) []in
 	return results
 }
 
+func matchesAnyToken(tokens []string, haystack string) bool {
+	for _, token := range tokens {
+		if fuzzyTokenMatch(token, haystack) {
+			return true
+		}
+	}
+	return false
+}
+
 func fuzzyTokenMatch(token, text string) bool {
+	// Short tokens must match as whole words. Plain substring matching is
+	// fine for longer terms, but a 2-3 character token like "go" occurs
+	// inside "algorithm", "google" and "going", which would let completely
+	// unrelated documents look relevant now that short tokens are no longer
+	// discarded outright.
+	if len(token) < 4 {
+		return containsTokenAtBoundary(text, token)
+	}
 	if strings.Contains(text, token) {
 		return true
 	}
@@ -202,6 +243,32 @@ func editDistanceAtMostOne(a, b string) bool {
 	return edits <= 1
 }
 
+// containsTokenAtBoundary reports whether token appears in text as a whole
+// word — neighbours must be non-alphanumeric. Used for short tokens, where
+// substring matching is too loose to be meaningful.
+func containsTokenAtBoundary(text, token string) bool {
+	isAlphanumeric := func(b byte) bool {
+		return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
+	}
+	for offset := 0; ; {
+		index := strings.Index(text[offset:], token)
+		if index < 0 {
+			return false
+		}
+		start := offset + index
+		end := start + len(token)
+		beforeOK := start == 0 || !isAlphanumeric(text[start-1])
+		afterOK := end == len(text) || !isAlphanumeric(text[end])
+		if beforeOK && afterOK {
+			return true
+		}
+		offset = start + 1
+		if offset >= len(text) {
+			return false
+		}
+	}
+}
+
 func absInt(value int) int {
 	if value < 0 {
 		return -value
@@ -209,21 +276,71 @@ func absInt(value int) int {
 	return value
 }
 
+// searchStopwords are words too generic to identify a topic. This list does
+// the filtering that a blunt minimum-length rule used to: the old code
+// dropped anything under 4 characters, which silently discarded the single
+// most meaningful term in queries like "latest PHP release", "npm install
+// fails" or "git rebase" — leaving only generic words to match on. That
+// produced live false positives (a GOV.UK story titled "DVLA releases latest
+// scam images" matched "latest PHP release" because both "latest" and
+// "release" were present and "php" had been thrown away).
+var searchStopwords = map[string]bool{
+	"a": true, "about": true, "all": true, "an": true, "and": true, "any": true,
+	"are": true, "as": true, "at": true, "be": true, "best": true, "but": true,
+	"by": true, "can": true, "current": true, "currently": true, "do": true,
+	"does": true, "for": true, "from": true, "get": true, "give": true,
+	"has": true, "have": true, "how": true, "in": true, "is": true, "it": true,
+	"its": true, "latest": true, "me": true, "my": true, "new": true,
+	"newest": true, "news": true, "not": true, "now": true, "of": true,
+	"on": true, "or": true, "recent": true, "should": true, "so": true,
+	"one": true, "ones": true, "please": true, "thing": true, "things": true,
+	"some": true, "tell": true, "that": true, "the": true, "their": true,
+	"there": true, "these": true, "this": true, "to": true, "today": true,
+	"update": true, "updated": true, "use": true, "using": true, "was": true,
+	"what": true, "when": true, "where": true, "which": true, "who": true,
+	"why": true, "will": true, "with": true, "you": true, "your": true,
+}
+
+// genericTopicWords still carry meaning but are far too common across
+// unrelated documents to identify a subject on their own. A result matching
+// only these is not on-topic — see coreSearchTokens.
+var genericTopicWords = map[string]bool{
+	"release": true, "releases": true, "released": true, "version": true,
+	"versions": true, "download": true, "install": true, "download s": true,
+	"price": true, "prices": true, "date": true, "dates": true, "time": true,
+	"guide": true, "tutorial": true, "docs": true, "documentation": true,
+}
+
+// significantSearchTokens returns every topic-bearing token in a query.
+// Short tokens are kept — "php", "git", "npm", "vue", "ios", "css", "sql",
+// "aws" and "api" are exactly the words that pin a query to its subject.
 func significantSearchTokens(query string) []string {
-	stopwords := map[string]bool{
-		"about": true, "and": true, "delhi": true, "india": true, "july": true,
-		"news": true, "recent": true, "the": true, "this": true, "what": true,
-	}
-	fields := strings.Fields(strings.ToLower(strings.NewReplacer(`"`, "", "'", "").Replace(query)))
+	fields := strings.Fields(strings.ToLower(strings.NewReplacer(`"`, " ", "'", "").Replace(query)))
 	seen := map[string]bool{}
 	result := make([]string, 0, len(fields))
 	for _, field := range fields {
-		field = strings.Trim(field, " ,.!?:;()[]{}")
-		if len(field) < 4 || stopwords[field] || seen[field] {
+		field = strings.Trim(field, " ,.!?:;()[]{}/\\")
+		if len(field) < 2 || searchStopwords[field] || seen[field] {
 			continue
 		}
 		seen[field] = true
 		result = append(result, field)
 	}
 	return result
+}
+
+// coreSearchTokens are the tokens that actually identify the subject — the
+// significant tokens minus the generic ones. At least one of these must
+// appear in a result for it to count as on-topic; matching only generic
+// words ("latest", "release") is how unrelated documents used to slip
+// through and then get counted as corroborating sources.
+func coreSearchTokens(query string) []string {
+	tokens := significantSearchTokens(query)
+	core := make([]string, 0, len(tokens))
+	for _, token := range tokens {
+		if !genericTopicWords[token] {
+			core = append(core, token)
+		}
+	}
+	return core
 }

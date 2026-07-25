@@ -327,6 +327,32 @@ func TestSuccessfulSearchRefusalGetsGroundedFallback(t *testing.T) {
 	}
 }
 
+// TestGroundingFallbackDoesNotOverrideATimeoutMessage reproduces a live bug:
+// asking "what is today's date" triggered a preflight search (webResults
+// non-empty), then the model's generation — and its one corrective-nudge
+// retry — both blew the thinking-token budget. That correctly produced the
+// graceful "I'm having trouble reaching a clear answer..." message, but the
+// grounding-fallback check right after it didn't know about
+// ThinkingBudgetExceeded and, seeing an "ungrounded" message with no cited
+// URL, replaced it anyway with a fabricated "Yes, I found current reporting
+// that matches your question" answer built from irrelevant search results.
+func TestGroundingFallbackDoesNotOverrideATimeoutMessage(t *testing.T) {
+	results := []internetSearchResult{{Title: "Unrelated result", URL: "https://example.com/unrelated"}}
+	timeoutMessage := "I'm having trouble reaching a clear answer for this without taking too long. Could you rephrase the question or break it into a smaller one?"
+
+	if shouldApplyGroundingFallback(false, true, false, results, false, timeoutMessage) {
+		t.Fatal("expected the timeout message to be left alone when ThinkingBudgetExceeded is true")
+	}
+	if shouldApplyGroundingFallback(false, true, false, results, false, "") {
+		t.Fatal("expected an empty budget-exceeded result to also be left alone (no fabricated fallback)")
+	}
+	// Sanity check the flag actually matters: with it false, the same
+	// ungrounded content should still get replaced as before.
+	if !shouldApplyGroundingFallback(false, false, false, results, false, timeoutMessage) {
+		t.Fatal("expected an ungrounded, non-timeout message to still be replaced")
+	}
+}
+
 func TestStepStagesReviewablePatch(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "controllers"), 0755); err != nil {
@@ -393,7 +419,7 @@ func TestThinkingBudgetStopsRunawayReasoning(t *testing.T) {
 	// done signal that never comes. A well-behaved cutoff must stop reading
 	// well before line maxThinkingTokens+1.
 	var body strings.Builder
-	for i := 0; i < maxThinkingTokens*2; i++ {
+	for i := 0; i < defaultMaxThinkingTokens*2; i++ {
 		body.WriteString(`{"message":{"thinking":"still thinking "}}` + "\n")
 	}
 	http.DefaultClient.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -419,5 +445,57 @@ func TestThinkingBudgetStopsRunawayReasoning(t *testing.T) {
 	}
 	if len(messages) != 0 {
 		t.Fatalf("expected no assistant message appended for an aborted generation, got %#v", messages)
+	}
+}
+
+// TestStepNumbersDoNotRepeatAfterAnAbortedStep reproduces a live bug: a step
+// that gets cut short (thinking budget exceeded, or the corrective-nudge
+// retry in agent.go) used to leave run.Steps unincremented, so the very
+// next Step call emitted "agent_step" with the same number as the aborted
+// one. The frontend timeline keys each step's row by that number, so a
+// repeat collided (a duplicate React key — one row silently never resolves
+// out of "running", exactly what surfaced as a permanently stuck "Planning
+// the next action" spinner during a live session).
+func TestStepNumbersDoNotRepeatAfterAnAbortedStep(t *testing.T) {
+	originalTransport := http.DefaultClient.Transport
+	t.Cleanup(func() { http.DefaultClient.Transport = originalTransport })
+
+	var runaway strings.Builder
+	for i := 0; i < defaultMaxThinkingTokens*2; i++ {
+		runaway.WriteString(`{"message":{"thinking":"still thinking "}}` + "\n")
+	}
+	http.DefaultClient.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(runaway.String())), Request: r}, nil
+	})
+
+	run := &AgentRun{Model: "test", MaxSteps: 5}
+	var stepNumbers []int
+	emit := func(event string, data any) {
+		if event != "agent_step" {
+			return
+		}
+		if m, ok := data.(map[string]any); ok {
+			stepNumbers = append(stepNumbers, m["step"].(int))
+		}
+	}
+
+	done, _, err := run.Step(context.Background(), nil, NewRegistry(t.TempDir()), "http://ollama.test", emit)
+	if err != nil || !done || !run.ThinkingBudgetExceeded {
+		t.Fatalf("expected the first step to abort on the thinking budget: done=%v err=%v exceeded=%v", done, err, run.ThinkingBudgetExceeded)
+	}
+
+	http.DefaultClient.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body := `{"message":{"content":"done"},"done":true}` + "\n"
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+	})
+	if _, _, err := run.Step(context.Background(), nil, NewRegistry(t.TempDir()), "http://ollama.test", emit); err != nil {
+		t.Fatalf("second step returned an error: %v", err)
+	}
+
+	if len(stepNumbers) != 2 {
+		t.Fatalf("expected exactly 2 agent_step emissions, got %v", stepNumbers)
+	}
+	if stepNumbers[0] == stepNumbers[1] {
+		t.Fatalf("expected the second step's number to differ from the aborted first one, got %v twice", stepNumbers[0])
 	}
 }
