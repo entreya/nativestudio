@@ -9,10 +9,10 @@ function DiffView({ diff }) {
     <pre style={{ margin: 0, maxHeight: 400, overflow: 'auto', borderRadius: 6, background: 'var(--studio-panel, #f5f1e9)', fontSize: 11.5, lineHeight: 1.55 }}>
       {(diff || '').split('\n').map((line, index) => {
         let style = { display: 'block', minHeight: '1.55em', padding: '0 10px', color: 'var(--studio-text, #2f2a26)' };
-        if (line.startsWith('@@')) style = { ...style, color: '#315f86', background: '#eff6ff', fontWeight: 600 };
+        if (line.startsWith('@@')) style = { ...style, color: 'var(--studio-accent, #315f86)', background: 'color-mix(in srgb, var(--studio-accent, #315f86) 10%, transparent)', fontWeight: 600 };
         else if (line.startsWith('+++') || line.startsWith('---')) style = { ...style, color: 'var(--studio-muted, #746b63)', fontWeight: 600 };
-        else if (line.startsWith('+')) style = { ...style, color: '#166534', background: '#f0fdf4' };
-        else if (line.startsWith('-')) style = { ...style, color: '#991b1b', background: '#fef2f2' };
+        else if (line.startsWith('+')) style = { ...style, color: 'var(--studio-success, #166534)', background: 'color-mix(in srgb, var(--studio-success, #166534) 10%, transparent)' };
+        else if (line.startsWith('-')) style = { ...style, color: 'var(--studio-danger, #991b1b)', background: 'color-mix(in srgb, var(--studio-danger, #991b1b) 10%, transparent)' };
         return <code key={`${index}-${line}`} style={style}>{line || ' '}</code>;
       })}
     </pre>

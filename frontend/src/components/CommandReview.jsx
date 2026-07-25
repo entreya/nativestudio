@@ -56,7 +56,7 @@ export default function CommandReview({ commands, onApprove, onReject, onApprove
               {cmd.command}
             </pre>
             {cmd.output && (
-              <pre style={{ margin: '8px 0 0', padding: 10, borderRadius: 6, maxHeight: 240, overflow: 'auto', fontSize: 11.5, whiteSpace: 'pre-wrap', background: cmd.status === 'failed' ? 'rgba(239, 68, 68, 0.08)' : 'var(--studio-bg, #e2e8f0)', color: cmd.status === 'failed' ? '#991b1b' : 'inherit' }}>
+              <pre style={{ margin: '8px 0 0', padding: 10, borderRadius: 6, maxHeight: 240, overflow: 'auto', fontSize: 11.5, whiteSpace: 'pre-wrap', background: cmd.status === 'failed' ? 'color-mix(in srgb, var(--studio-danger, #b85c5c) 10%, transparent)' : 'var(--studio-bg, #e2e8f0)', color: cmd.status === 'failed' ? 'var(--studio-danger, #b85c5c)' : 'inherit' }}>
                 {cmd.output}
               </pre>
             )}

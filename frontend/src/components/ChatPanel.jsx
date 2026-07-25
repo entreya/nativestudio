@@ -20,7 +20,8 @@ import {
   CloseOutlined,
   ArrowUpOutlined,
 } from '@ant-design/icons';
-import ThinkingTimeline from './ThinkingTimeline';
+import { TimelineEntryContent } from './ThinkingTimeline';
+import { iconFor, colorFor, workingPlaceholderEntry } from './timelineEntry';
 import CodeSnippet from './CodeSnippet';
 import PatchReview from './PatchReview';
 import CommandReview from './CommandReview';
@@ -102,6 +103,131 @@ function withContextEntry(timeline, apply) {
   return next;
 }
 
+// Rebuilds the same `timeline` entry array the live SSE handler below builds
+// incrementally, but from the flat event log the backend persists with the
+// message (agent.go's persistedTimelineEvents). Used when loading a past
+// conversation, so a refresh shows the same reasoning trace the user watched
+// live instead of a bare answer with no steps shown — only the six event
+// types the backend actually stores are handled here; unlisted ones (token,
+// usage, agent_done, …) never appear in the stored log.
+function replayTimeline(events) {
+  let timeline = [];
+  for (const { type, data } of events || []) {
+    switch (type) {
+      case 'agent_step': {
+        const last = timeline[timeline.length - 1];
+        if (last && last.kind === 'step' && last.status === 'running') {
+          timeline = [...timeline.slice(0, -1), { ...last, text: data.message || last.text }];
+        } else {
+          timeline = [...closeRunningEntries(timeline), {
+            id: `step-${data.step ?? timeline.length}`, kind: 'step', status: 'running', text: data.message || 'Working…',
+          }];
+        }
+        break;
+      }
+      case 'thinking_token': {
+        const last = timeline[timeline.length - 1];
+        if (last && last.kind === 'thinking' && last.status === 'running') {
+          timeline = [...timeline.slice(0, -1), { ...last, text: (last.text || '') + (data.text || '') }];
+        } else {
+          timeline = [...timeline, { id: `thinking-${timeline.length}`, kind: 'thinking', status: 'running', text: data.text }];
+        }
+        break;
+      }
+      case 'tool_call':
+        timeline = [...closeRunningEntries(timeline), { id: data.id, kind: 'tool', status: 'running', name: data.name, input: data.input }];
+        break;
+      case 'tool_result':
+        timeline = timeline.map(entry => entry.id === data.id
+          ? { ...entry, status: data.ok ? 'done' : 'error', output: data.output, error: data.error }
+          : entry);
+        break;
+      case 'context_resolved':
+        timeline = withContextEntry(timeline, entry => ({
+          ...entry,
+          items: [...entry.items, { label: `${data.file}${data.symbol ? ` › ${data.symbol.name}` : ''} (${data.confidence})` }],
+          count: entry.count + 1,
+        }));
+        break;
+      case 'context_candidate':
+        timeline = withContextEntry(timeline, entry => ({
+          ...entry,
+          items: [...entry.items, { label: `${data.path || data.kind}${data.symbol ? ` › ${data.symbol}` : ''}` }],
+          count: entry.count + 1,
+        }));
+        break;
+      case 'context_built':
+        timeline = withContextEntry(timeline, entry => ({ ...entry, status: 'done', tokens: data.tokens, budget: data.budget }));
+        break;
+      default:
+        break;
+    }
+  }
+  // A restored conversation is always finished — nothing should still read "running".
+  return closeRunningEntries(timeline);
+}
+
+// Messages come back from /api/sessions/:id/messages with `timeline` as the
+// raw JSON string the backend stored (or absent/empty). Parse it into the
+// entry array the renderer expects; anything malformed or missing degrades
+// to no timeline rather than breaking the message list.
+function hydrateMessage(msg) {
+  if (!msg || msg.role !== 'assistant' || !msg.timeline) return msg;
+  try {
+    const events = JSON.parse(msg.timeline);
+    return { ...msg, timeline: replayTimeline(events) };
+  } catch {
+    return { ...msg, timeline: [] };
+  }
+}
+
+// One row in the single conversation-wide rail: a message's own role dot, or
+// one of its agent's reasoning steps below it — both rendered through this
+// same component. The gutter uses plain flexbox centering (icon + a flex:1
+// connector filling whatever space is left) instead of measuring one rail's
+// dot size against another's, so a step's marker naturally lines up under
+// the message dot above it with no coordinates to keep in sync, and the
+// connector naturally stretches to match however tall the row's content
+// turns out to be.
+function Row({ dot, drawConnector, spacious, children }) {
+  return (
+    <div style={{ display: 'flex', gap: 16 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: 20, flexShrink: 0 }}>
+        {dot}
+        {drawConnector && <div style={{ flex: 1, width: 2, minHeight: 6, backgroundColor: 'var(--studio-border, #e2dcd4)', opacity: 0.4, marginTop: 2 }} />}
+      </div>
+      <div style={{ flex: 1, minWidth: 0, paddingBottom: spacious ? 16 : 10 }}>{children}</div>
+    </div>
+  );
+}
+
+function RoleDot({ color, pulsing }) {
+  return (
+    <div style={{
+      width: 10, height: 10, borderRadius: '50%', flexShrink: 0, marginTop: 4,
+      backgroundColor: color, animation: pulsing ? 'ai-pulse 1.5s infinite ease-in-out' : 'none',
+    }} />
+  );
+}
+
+function StepDot({ entry }) {
+  const color = colorFor(entry);
+  const Icon = iconFor(entry);
+  return (
+    <div style={{
+      width: 18, height: 18, borderRadius: '50%', flexShrink: 0, marginTop: 1,
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      backgroundColor: 'var(--studio-bg, #f7f4ed)', border: `1.5px solid ${color}`,
+    }}>
+      {/* eslint-disable-next-line react-hooks/static-components -- Icon is
+          picked from a fixed table of module-level icon components keyed by
+          entry status/kind/name, not created fresh each render; the rule
+          can't see through iconFor() to know that. */}
+      <Icon spin={entry.status === 'running'} style={{ color, fontSize: 8.5 }} />
+    </div>
+  );
+}
+
 export default function ChatPanel({
   activeFilePath,
   activeProject,
@@ -129,6 +255,10 @@ export default function ChatPanel({
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [followUpAnswers, setFollowUpAnswers] = useState({});
+  // Expand/collapse state for individual timeline steps, keyed by
+  // `${messageIndex}:${entryId}` since entry ids (e.g. 'context') repeat
+  // across different messages' own timelines.
+  const [timelineOverrides, setTimelineOverrides] = useState({});
   const [editingMessage, setEditingMessage] = useState(null);
   const [editDraft, setEditDraft] = useState('');
   const [pendingPatches, setPendingPatches] = useState([]);
@@ -259,7 +389,7 @@ export default function ChatPanel({
         fetch(`/api/sessions/${sess.id}/commands?status=pending`),
       ]);
       const data = await messagesResponse.json();
-      if (messagesResponse.ok) setMessages(data.messages || []);
+      if (messagesResponse.ok) setMessages((data.messages || []).map(hydrateMessage));
       const patchData = await patchesResponse.json();
       setPendingPatches(patchesResponse.ok ? (patchData.patches || []) : []);
       const commandData = await commandsResponse.json();
@@ -412,6 +542,26 @@ export default function ChatPanel({
                 case 'thinking_unavailable':
                   lastMsg.thinkingNotice = data.message;
                   break;
+
+                // Without this the timeline stays empty while Ollama loads the
+                // model and evaluates the prompt — which is most of the wait on
+                // a cold start, and read as "nothing is happening".
+                case 'agent_step': {
+                  const timeline = lastMsg.timeline;
+                  const last = timeline[timeline.length - 1];
+                  if (last && last.kind === 'step' && last.status === 'running') {
+                    timeline[timeline.length - 1] = { ...last, text: data.message || last.text };
+                  } else {
+                    lastMsg.timeline = closeRunningEntries(timeline);
+                    lastMsg.timeline.push({
+                      id: `step-${data.step ?? lastMsg.timeline.length}`,
+                      kind: 'step',
+                      status: 'running',
+                      text: data.message || 'Working…',
+                    });
+                  }
+                  break;
+                }
 
                 case 'tool_call':
                   lastMsg.timeline = closeRunningEntries(lastMsg.timeline);
@@ -675,8 +825,12 @@ export default function ChatPanel({
             <Tooltip title={`Context used: ${(contextData.tokensUsed || 0).toLocaleString()} / ${(contextData.tokensTotal || 0).toLocaleString()} tokens${(agentRunning || liveUsage.prompt > 0 || liveUsage.completion > 0) ? ` · this turn +${liveUsage.prompt.toLocaleString()} in / ${liveUsage.completion.toLocaleString()} out` : ''}`}>
               <span style={{
                 flexShrink: 0, fontSize: 9, fontWeight: 700, padding: '1px 6px', borderRadius: 8, lineHeight: '14px',
-                color: contextData.pct > 80 ? '#b85c5c' : contextData.pct > 50 ? '#c69455' : '#6b8f71',
-                backgroundColor: contextData.pct > 80 ? 'rgba(184,92,92,0.12)' : contextData.pct > 50 ? 'rgba(198,148,85,0.12)' : 'rgba(107,143,113,0.12)',
+                color: contextData.pct > 80 ? 'var(--studio-danger, #b85c5c)' : contextData.pct > 50 ? 'var(--studio-warning, #c69455)' : 'var(--studio-success, #6b8f71)',
+                backgroundColor: contextData.pct > 80
+                  ? 'color-mix(in srgb, var(--studio-danger, #b85c5c) 12%, transparent)'
+                  : contextData.pct > 50
+                    ? 'color-mix(in srgb, var(--studio-warning, #c69455) 12%, transparent)'
+                    : 'color-mix(in srgb, var(--studio-success, #6b8f71) 12%, transparent)',
               }}>
                 {contextData.pct}%
               </span>
@@ -686,7 +840,7 @@ export default function ChatPanel({
           <div style={{ position: 'absolute', left: 0, right: 0, bottom: -1, height: 1.5, backgroundColor: 'var(--studio-border, #d8d1c5)' }}>
             <div style={{
               height: '100%', width: `${Math.min(contextData.pct, 100)}%`, transition: 'width 0.3s ease',
-              backgroundColor: contextData.pct > 80 ? '#b85c5c' : contextData.pct > 50 ? '#c69455' : '#6b8f71',
+              backgroundColor: contextData.pct > 80 ? 'var(--studio-danger, #b85c5c)' : contextData.pct > 50 ? 'var(--studio-warning, #c69455)' : 'var(--studio-success, #6b8f71)',
             }} />
           </div>
         </div>
@@ -724,7 +878,7 @@ export default function ChatPanel({
           )}
         </div>
 
-        <div style={{ flexGrow: 1, overflowY: 'auto', padding: 16, display: 'flex', flexDirection: 'column', gap: 16 }}>
+        <div style={{ flexGrow: 1, overflowY: 'auto', padding: 16, display: 'flex', flexDirection: 'column' }}>
           {messages.length === 0 ? (
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', gap: 16, padding: '24px 0' }}>
               <MessageOutlined style={{ fontSize: 48, color: 'var(--studio-border, #d8d1c5)' }} />
@@ -739,109 +893,47 @@ export default function ChatPanel({
               </div>
             </div>
           ) : (
-            messages.map((msg, i) => {
+            messages.flatMap((msg, i) => {
               const isUser = msg.role === 'user';
               const isSystem = msg.role === 'system';
               const isEditing = editingMessage === i;
               const isLastMessage = i === messages.length - 1;
               const isRunningHere = agentRunning && isLastMessage;
 
-              return (
-                <div key={i} style={{
-                  display: 'flex',
-                  gap: 16,
-                  alignSelf: 'stretch',
-                  position: 'relative'
-                }}>
-                  {/* Timeline Gutter */}
-                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: 20, flexShrink: 0, position: 'relative' }}>
-                    {/* The Dot */}
-                    <div style={{
-                      width: 10, height: 10, borderRadius: '50%', flexShrink: 0, marginTop: 4, zIndex: 1,
-                      backgroundColor: isUser ? 'var(--studio-muted, #9b9085)' : isSystem ? 'var(--studio-border, #d8d1c5)' : 'var(--studio-accent, #c15f3c)',
-                      animation: (msg.role === 'assistant' && isRunningHere) ? 'ai-pulse 1.5s infinite ease-in-out' : 'none'
-                    }} />
-                    
-                    {/* Faded Vertical Line */}
-                    {!isLastMessage && <div style={{ position: 'absolute', top: 20, bottom: -16, width: 2, backgroundColor: 'var(--studio-border, #e2dcd4)', opacity: 0.4, zIndex: 0 }} />}
-                  </div>
+              // A real timeline once the agent has emitted steps; otherwise a
+              // single placeholder row while it's working but hasn't streamed
+              // anything yet (covers the model-load/prompt-eval stretch on a
+              // cold start) — never both, and never once real content exists.
+              const rawTimeline = msg.role === 'assistant' ? (msg.timeline || []) : [];
+              const stepEntries = rawTimeline.length > 0
+                ? rawTimeline
+                : (msg.role === 'assistant' && isRunningHere && !msg.content ? [workingPlaceholderEntry()] : []);
+              const hasSteps = stepEntries.length > 0;
 
-                  {/* Message Content */}
-                  <div style={{
-                     flexGrow: 1, minWidth: 0, paddingBottom: 16,
-                     color: isSystem ? 'var(--studio-subtle, #91877e)' : 'var(--studio-text, #2f2a26)',
-                     fontStyle: isSystem ? 'italic' : 'normal',
-                  }}>
-                    <Text style={{ fontWeight: 600, display: 'block', marginBottom: 4, color: 'var(--studio-muted, #746b63)', fontSize: 12 }}>
-                      {isUser ? 'You' : isSystem ? 'System' : 'Assistant'}
-                    </Text>
-
+              // Role-specific content/edit UI/follow-up/action-buttons —
+              // attached to whichever row is visually last for this message
+              // (the header row if there are no steps, otherwise the final
+              // step row), so it reads as part of the same list instead of a
+              // separate block glued on afterward.
+              const messageBody = (
+                <>
                   {msg.role === 'assistant' ? (
-                    <div style={{ width: '100%', overflow: 'hidden' }}>
-                      {msg.thinkingNotice && (
-                        <div style={{ marginBottom: 8, color: '#94613f', fontSize: 11 }}>{msg.thinkingNotice}</div>
-                      )}
-
-                      <ThinkingTimeline entries={msg.timeline || []} running={isRunningHere} hasContent={Boolean(msg.content)} />
-
-                      {isEditing ? (
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                          <TextArea autoSize={{ minRows: 2, maxRows: 8 }} value={editDraft} onChange={event => setEditDraft(event.target.value)} />
-                          <div style={{ display: 'flex', gap: 4 }}>
-                            <Button size="small" type="primary" icon={<CheckOutlined />} onClick={() => handleSaveEdit(i)}>Save</Button>
-                            <Button size="small" icon={<CloseOutlined />} onClick={() => setEditingMessage(null)}>Cancel</Button>
-                          </div>
+                    isEditing ? (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                        <TextArea autoSize={{ minRows: 2, maxRows: 8 }} value={editDraft} onChange={event => setEditDraft(event.target.value)} />
+                        <div style={{ display: 'flex', gap: 4 }}>
+                          <Button size="small" type="primary" icon={<CheckOutlined />} onClick={() => handleSaveEdit(i)}>Save</Button>
+                          <Button size="small" icon={<CloseOutlined />} onClick={() => setEditingMessage(null)}>Cancel</Button>
                         </div>
-                      ) : msg.content && (
-                        <div style={{ whiteSpace: 'pre-wrap', fontSize: '13.6px', lineHeight: 1.5, color: 'var(--studio-text, #2f2a26)' }}>
-                          <MessageContent content={msg.content} />
-                          {isRunningHere && !msg.timeline?.some(e => e.status === 'running') && (
-                            <span style={{ display: 'inline-block', width: '2px', height: '1em', backgroundColor: 'var(--studio-accent, #c15f3c)', marginLeft: 1, verticalAlign: 'text-bottom', animation: 'blink 1s step-end infinite' }} aria-hidden="true" />
-                          )}
-                        </div>
-                      )}
-
-                      {msg.followUp && !msg.followUp.answered && (
-                        <div style={{ marginTop: 10, padding: 12, border: '1px solid var(--studio-border, #c8bfb2)', borderRadius: 8, backgroundColor: 'var(--studio-surface, #fffdf8)' }}>
-                          <Text style={{ color: 'var(--studio-text, #2f2a26)', display: 'block', marginBottom: 10 }}>{msg.followUp.question}</Text>
-                          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'stretch', gap: 10 }}>
-                            {msg.followUp.input_type === 'multiselect' && (msg.followUp.options || []).length > 0 ? (
-                              <Checkbox.Group
-                                value={followUpAnswers[i] || []}
-                                onChange={value => setFollowUpAnswers(prev => ({ ...prev, [i]: value }))}
-                                style={{ display: 'flex', flexDirection: 'column', gap: 7 }}
-                                options={msg.followUp.options.map(option => ({ value: option, label: option }))}
-                              />
-                            ) : msg.followUp.input_type === 'select' && (msg.followUp.options || []).length > 0 ? (
-                              <Radio.Group
-                                value={followUpAnswers[i]}
-                                onChange={event => setFollowUpAnswers(prev => ({ ...prev, [i]: event.target.value }))}
-                                style={{ display: 'flex', flexDirection: 'column', gap: 7 }}
-                                options={msg.followUp.options.map(option => ({ value: option, label: option }))}
-                              />
-                            ) : (
-                              <BorderBeam color="var(--studio-accent, #c15f3c)" style={{ opacity: followUpFocusedIndex === i ? 1 : 0, transition: 'opacity 0.25s ease' }}>
-                                <div style={{ position: 'relative' }}>
-                                  <Input
-                                    placeholder="Type your answer"
-                                    value={followUpAnswers[i] || ''}
-                                    onChange={event => setFollowUpAnswers(prev => ({ ...prev, [i]: event.target.value }))}
-                                    onPressEnter={() => submitFollowUp(i, msg.followUp)}
-                                    onFocus={() => setFollowUpFocusedIndex(i)}
-                                    onBlur={() => setFollowUpFocusedIndex(current => current === i ? null : current)}
-                                  />
-                                </div>
-                              </BorderBeam>
-                            )}
-                            <Button type="primary" disabled={agentRunning || !hasFollowUpAnswer(i)} onClick={() => submitFollowUp(i, msg.followUp)}>Continue</Button>
-                          </div>
-                        </div>
-                      )}
-
-                      {msg.followUp?.answered && (
-                        <Text style={{ display: 'block', marginTop: 8, color: 'var(--studio-muted, #746b63)', fontSize: 11 }}>Answered: {msg.followUp.answer}</Text>
-                      )}
-                    </div>
+                      </div>
+                    ) : msg.content && (
+                      <div style={{ whiteSpace: 'pre-wrap', fontSize: '13.6px', lineHeight: 1.5, color: 'var(--studio-text, #2f2a26)' }}>
+                        <MessageContent content={msg.content} />
+                        {isRunningHere && !stepEntries.some(e => e.status === 'running') && (
+                          <span style={{ display: 'inline-block', width: '2px', height: '1em', backgroundColor: 'var(--studio-accent, #c15f3c)', marginLeft: 1, verticalAlign: 'text-bottom', animation: 'blink 1s step-end infinite' }} aria-hidden="true" />
+                        )}
+                      </div>
+                    )
                   ) : isEditing ? (
                     <div style={{ minWidth: 260, display: 'flex', flexDirection: 'column', gap: 6 }}>
                       <TextArea autoSize={{ minRows: 2, maxRows: 8 }} value={editDraft} onChange={event => setEditDraft(event.target.value)} />
@@ -854,6 +946,47 @@ export default function ChatPanel({
                     <div style={{ whiteSpace: 'pre-wrap', fontSize: isSystem ? '12px' : '13.6px', lineHeight: 1.4 }}>{msg.content}</div>
                   )}
 
+                  {msg.role === 'assistant' && msg.followUp && !msg.followUp.answered && (
+                    <div style={{ marginTop: 10, padding: 12, border: '1px solid var(--studio-border, #c8bfb2)', borderRadius: 8, backgroundColor: 'var(--studio-surface, #fffdf8)' }}>
+                      <Text style={{ color: 'var(--studio-text, #2f2a26)', display: 'block', marginBottom: 10 }}>{msg.followUp.question}</Text>
+                      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'stretch', gap: 10 }}>
+                        {msg.followUp.input_type === 'multiselect' && (msg.followUp.options || []).length > 0 ? (
+                          <Checkbox.Group
+                            value={followUpAnswers[i] || []}
+                            onChange={value => setFollowUpAnswers(prev => ({ ...prev, [i]: value }))}
+                            style={{ display: 'flex', flexDirection: 'column', gap: 7 }}
+                            options={msg.followUp.options.map(option => ({ value: option, label: option }))}
+                          />
+                        ) : msg.followUp.input_type === 'select' && (msg.followUp.options || []).length > 0 ? (
+                          <Radio.Group
+                            value={followUpAnswers[i]}
+                            onChange={event => setFollowUpAnswers(prev => ({ ...prev, [i]: event.target.value }))}
+                            style={{ display: 'flex', flexDirection: 'column', gap: 7 }}
+                            options={msg.followUp.options.map(option => ({ value: option, label: option }))}
+                          />
+                        ) : (
+                          <BorderBeam color="var(--studio-accent, #c15f3c)" style={{ opacity: followUpFocusedIndex === i ? 1 : 0, transition: 'opacity 0.25s ease' }}>
+                            <div style={{ position: 'relative' }}>
+                              <Input
+                                placeholder="Type your answer"
+                                value={followUpAnswers[i] || ''}
+                                onChange={event => setFollowUpAnswers(prev => ({ ...prev, [i]: event.target.value }))}
+                                onPressEnter={() => submitFollowUp(i, msg.followUp)}
+                                onFocus={() => setFollowUpFocusedIndex(i)}
+                                onBlur={() => setFollowUpFocusedIndex(current => current === i ? null : current)}
+                              />
+                            </div>
+                          </BorderBeam>
+                        )}
+                        <Button type="primary" disabled={agentRunning || !hasFollowUpAnswer(i)} onClick={() => submitFollowUp(i, msg.followUp)}>Continue</Button>
+                      </div>
+                    </div>
+                  )}
+
+                  {msg.role === 'assistant' && msg.followUp?.answered && (
+                    <Text style={{ display: 'block', marginTop: 8, color: 'var(--studio-muted, #746b63)', fontSize: 11 }}>Answered: {msg.followUp.answer}</Text>
+                  )}
+
                   {!isSystem && msg.content && !isEditing && (
                     <div style={{ display: 'flex', justifyContent: 'flex-start', gap: 2, marginTop: 5 }}>
                       <Button type="text" size="small" title="Edit" aria-label="Edit message" icon={<EditOutlined />} onClick={() => { setEditingMessage(i); setEditDraft(msg.content); }} />
@@ -862,10 +995,59 @@ export default function ChatPanel({
                     </div>
                   )}
 
-                  {msg.stopped && <Text style={{ display: 'block', marginTop: 5, color: '#b85c5c', fontSize: 11 }}>Stopped</Text>}
-                  </div>
-                </div>
+                  {msg.stopped && <Text style={{ display: 'block', marginTop: 5, color: 'var(--studio-danger, #b85c5c)', fontSize: 11 }}>Stopped</Text>}
+                </>
               );
+
+              const rows = [];
+
+              rows.push(
+                <Row
+                  key={`${i}-header`}
+                  drawConnector={hasSteps || !isLastMessage}
+                  spacious={!hasSteps}
+                  dot={<RoleDot
+                    color={isUser ? 'var(--studio-muted, #9b9085)' : isSystem ? 'var(--studio-border, #d8d1c5)' : 'var(--studio-accent, #c15f3c)'}
+                    pulsing={msg.role === 'assistant' && isRunningHere}
+                  />}
+                >
+                  <div style={{
+                    color: isSystem ? 'var(--studio-subtle, #91877e)' : 'var(--studio-text, #2f2a26)',
+                    fontStyle: isSystem ? 'italic' : 'normal',
+                  }}>
+                    <Text style={{ fontWeight: 600, display: 'block', marginBottom: 4, color: 'var(--studio-muted, #746b63)', fontSize: 12 }}>
+                      {isUser ? 'You' : isSystem ? 'System' : 'Assistant'}
+                    </Text>
+                    {msg.role === 'assistant' && msg.thinkingNotice && (
+                      <div style={{ marginBottom: 8, color: 'var(--studio-warning, #94613f)', fontSize: 11 }}>{msg.thinkingNotice}</div>
+                    )}
+                    {!hasSteps && messageBody}
+                  </div>
+                </Row>
+              );
+
+              stepEntries.forEach((entry, idx) => {
+                const isFinalStep = idx === stepEntries.length - 1;
+                const overrideKey = `${i}:${entry.id}`;
+                const expanded = overrideKey in timelineOverrides ? timelineOverrides[overrideKey] : (isRunningHere && isFinalStep);
+                rows.push(
+                  <Row
+                    key={`${i}-${entry.id}`}
+                    drawConnector={!isFinalStep || !isLastMessage}
+                    spacious={isFinalStep}
+                    dot={<StepDot entry={entry} />}
+                  >
+                    <TimelineEntryContent
+                      entry={entry}
+                      expanded={expanded}
+                      onToggle={() => setTimelineOverrides(prev => ({ ...prev, [overrideKey]: !expanded }))}
+                    />
+                    {isFinalStep && <div style={{ marginTop: 8 }}>{messageBody}</div>}
+                  </Row>
+                );
+              });
+
+              return rows;
             })
           )}
           {pendingPatches.length > 0 && !agentRunning && (

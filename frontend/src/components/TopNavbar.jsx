@@ -19,7 +19,7 @@ import IndexActivityWidget from './IndexActivityWidget';
 const { Text } = Typography;
 
 export default function TopNavbar({ folderName, onNavigate, onOpenFile, onOpenFolder, layout, onToggleLayout }) {
-  const { indexProcesses, stopIndexing, approveEnrichment } = useAppState();
+  const { indexProcesses, stopIndexing, approveEnrichment, declineEnrichment, pauseEnrichment, resumeEnrichment } = useAppState();
 
   // Open the notification panel by default whenever there's something to
   // see — either on first load (work already in progress) or the moment new
@@ -104,6 +104,14 @@ export default function TopNavbar({ folderName, onNavigate, onOpenFile, onOpenFo
     <header className="claude-navbar">
       {/* Left: App Menus */}
       <nav className="claude-app-menus" aria-label="Application menu">
+        <Button
+          type="text"
+          className="claude-nav-brand"
+          style={{ fontWeight: 700, color: 'var(--studio-accent, #c15f3c)' }}
+          onClick={() => onNavigate('home')}
+        >
+          NativeStudio
+        </Button>
         <Dropdown menu={{ items: fileItems, onClick: handleFileMenu }} trigger={['click']} placement="bottomLeft">
           <Button type="text" style={{ fontWeight: 500 }}>File</Button>
         </Dropdown>
@@ -154,7 +162,7 @@ export default function TopNavbar({ folderName, onNavigate, onOpenFile, onOpenFo
             content={
               <div>
                 {indexProcesses && indexProcesses.length > 0
-                  ? <IndexActivityWidget processes={indexProcesses} onStop={stopIndexing} onApprove={approveEnrichment} />
+                  ? <IndexActivityWidget processes={indexProcesses} onStop={stopIndexing} onApprove={approveEnrichment} onDecline={declineEnrichment} onPause={pauseEnrichment} onResume={resumeEnrichment} />
                   : <Text type="secondary" style={{ padding: '8px 4px' }}>Nothing to report</Text>}
                 <Divider style={{ margin: '10px 0' }} />
                 <Button type="text" size="small" icon={<ThunderboltOutlined />} loading={unloading} onClick={handleFreeMemory} style={{ width: '100%', justifyContent: 'flex-start', color: 'var(--studio-muted, #746b63)' }}>
@@ -166,7 +174,7 @@ export default function TopNavbar({ folderName, onNavigate, onOpenFile, onOpenFo
             open={notifOpen}
             onOpenChange={setNotifOpen}
           >
-            <Badge count={indexProcesses?.filter(p => p.status === 'running' || p.status === 'pending_confirmation').length || 0} size="small">
+            <Badge count={indexProcesses?.filter(p => p.status === 'running' || p.status === 'pending_confirmation' || p.status === 'paused').length || 0} size="small">
               <Button type="text" icon={<BellOutlined />} style={{ borderRadius: '50%' }} />
             </Badge>
           </Popover>

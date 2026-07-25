@@ -456,7 +456,7 @@ button, input, textarea { font: inherit; }
   transition: opacity 300ms ease, border-color 150ms ease;
 }
 .idx-card.idx-status-done { opacity: 0.6; }
-.idx-card.idx-status-error { border-color: #b85c5c; }
+.idx-card.idx-status-error { border-color: var(--studio-danger, #b85c5c); }
 .idx-card.idx-status-pending_confirmation { border-color: var(--studio-accent, #c15f3c); background: color-mix(in srgb, var(--studio-accent, #c15f3c) 6%, var(--studio-surface, #fffdf8)); }
 
 .idx-card-header {
@@ -474,9 +474,10 @@ button, input, textarea { font: inherit; }
   flex-shrink: 0;
   background: var(--studio-muted, #9b9085);
 }
-.idx-status-dot-done { background: #6b8f71; }
-.idx-status-dot-error { background: #b85c5c; }
+.idx-status-dot-done { background: var(--studio-success, #6b8f71); }
+.idx-status-dot-error { background: var(--studio-danger, #b85c5c); }
 .idx-status-dot-pending_confirmation { background: var(--studio-accent, #c15f3c); }
+.idx-status-dot-paused { background: var(--studio-warning, #b8925c); }
 
 .idx-card-title {
   flex: 1;
@@ -501,7 +502,7 @@ button, input, textarea { font: inherit; }
   font-size: 11px;
   transition: background 120ms, color 120ms;
 }
-.idx-icon-btn:hover { background: var(--studio-panel, #f1ece4); color: #b85c5c; }
+.idx-icon-btn:hover { background: var(--studio-panel, #f1ece4); color: var(--studio-danger, #b85c5c); }
 
 /* ── Progress bar ──────────────────────────────────────── */
 .idx-progress-track {

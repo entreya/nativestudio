@@ -1,43 +1,8 @@
-import React, { useState } from 'react';
+import React from 'react';
 import { Typography } from 'antd';
-import {
-  BulbOutlined,
-  SearchOutlined,
-  FileSearchOutlined,
-  FolderOpenOutlined,
-  GlobalOutlined,
-  EyeOutlined,
-  EditOutlined,
-  FileAddOutlined,
-  DeleteOutlined,
-  DiffOutlined,
-  CodeOutlined,
-  ToolOutlined,
-  CheckCircleFilled,
-  CloseCircleFilled,
-  LoadingOutlined,
-  DownOutlined,
-} from '@ant-design/icons';
+import { DownOutlined } from '@ant-design/icons';
 
 const { Text } = Typography;
-
-// One icon per tool so the timeline reads at a glance, the way Claude's own
-// transcript distinguishes a file read from a search from an edit.
-const TOOL_ICONS = {
-  find_files: FileSearchOutlined,
-  list_directory: FolderOpenOutlined,
-  list_files: FolderOpenOutlined,
-  search_text: SearchOutlined,
-  search_internet: GlobalOutlined,
-  read_file: EyeOutlined,
-  read_file_range: EyeOutlined,
-  get_editor_context: EyeOutlined,
-  replace_in_file: EditOutlined,
-  apply_patch: DiffOutlined,
-  create_file: FileAddOutlined,
-  delete_file: DeleteOutlined,
-  run_command: CodeOutlined,
-};
 
 // Fields containing full file/diff bodies — never dumped as part of the
 // clean key/value input list; PatchReview (or a dedicated preview below)
@@ -45,20 +10,6 @@ const TOOL_ICONS = {
 const LARGE_CONTENT_FIELDS = new Set(['content', 'diff', 'old_text', 'new_text']);
 
 const FIELD_LABELS = { query: 'Query', path: 'Path', extensions: 'Extensions', file_types: 'Type', limit: 'Limit', max_results: 'Max results', depth: 'Depth', command: 'Command', cwd: 'Directory' };
-
-function iconFor(entry) {
-  if (entry.status === 'error') return CloseCircleFilled;
-  if (entry.status === 'running') return LoadingOutlined;
-  if (entry.kind === 'thinking') return BulbOutlined;
-  if (entry.kind === 'context') return SearchOutlined;
-  return TOOL_ICONS[entry.name] || ToolOutlined;
-}
-
-function colorFor(entry) {
-  if (entry.status === 'error') return '#b85c5c';
-  if (entry.status === 'running') return 'var(--studio-accent, #c15f3c)';
-  return '#6b8f71';
-}
 
 /** One-line summary shown collapsed — the thing a user scans to follow along. */
 function summaryFor(entry) {
@@ -70,6 +21,11 @@ function summaryFor(entry) {
     if (entry.status === 'running') return 'Gathering context…';
     if (count === 0) return 'Checked project context';
     return `Gathered context from ${count} source${count === 1 ? '' : 's'}`;
+  }
+  if (entry.kind === 'step') {
+    // Covers the otherwise-silent stretch while Ollama loads the model and
+    // evaluates the prompt, before the first token arrives.
+    return entry.status === 'running' ? (entry.text || 'Working…') : (entry.doneText || 'Planned next action');
   }
   // kind === 'tool'
   const { name, input, output, status, error } = entry;
@@ -151,8 +107,8 @@ function blockStyle(isError) {
   return {
     margin: '4px 0 0', padding: 8, borderRadius: 6, fontSize: 11.5, lineHeight: 1.5,
     overflowX: 'auto', whiteSpace: 'pre-wrap', maxHeight: 240, overflowY: 'auto',
-    background: isError ? 'rgba(239, 68, 68, 0.08)' : 'var(--studio-panel, #f5f1e9)',
-    color: isError ? '#991b1b' : 'inherit',
+    background: isError ? 'color-mix(in srgb, var(--studio-danger, #b85c5c) 10%, transparent)' : 'var(--studio-panel, #f5f1e9)',
+    color: isError ? 'var(--studio-danger, #b85c5c)' : 'inherit',
   };
 }
 
@@ -278,105 +234,44 @@ function ToolBody({ entry }) {
 
 const KIND_BODY = { thinking: ThinkingBody, context: ContextBody, tool: ToolBody };
 
-// ICON_COLUMN is the diameter of each step marker; a continuous rail connects
-// marker centers top to bottom, the way a git-log graph or an activity feed
-// reads — one glance shows the run as a sequence, not a pile of loose chips.
-const ICON_COLUMN = 18;
-
-function TimelineRow({ entry, isLast, expanded, onToggle }) {
-  const color = colorFor(entry);
-  const Icon = iconFor(entry);
+/**
+ * The collapsible right-hand content for one timeline entry — summary line,
+ * expand chevron, and the expanded body. Deliberately has no icon or rail of
+ * its own: ChatPanel renders every step as a row in the SAME flex-column
+ * gutter it uses for the message's own dot, so a step's marker is just
+ * another entry in that one list rather than a second rail that has to be
+ * measured and offset to line up with the first.
+ */
+export function TimelineEntryContent({ entry, expanded, onToggle }) {
   const Body = KIND_BODY[entry.kind] || ToolBody;
   return (
-    <div style={{ display: 'flex', gap: 8 }}>
-      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: ICON_COLUMN, flexShrink: 0 }}>
-        <div style={{
-          width: ICON_COLUMN, height: ICON_COLUMN, borderRadius: '50%', flexShrink: 0,
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          backgroundColor: 'var(--studio-bg, #f7f4ed)', border: `1.5px solid ${color}`,
-        }}>
-          {/* eslint-disable-next-line react-hooks/static-components -- Icon is
-              picked from a fixed table of module-level icon components keyed
-              by entry status/kind/name, not created fresh each render; the
-              rule can't see through iconFor() to know that. */}
-          <Icon spin={entry.status === 'running'} style={{ color, fontSize: 8.5 }} />
+    <div>
+      <button
+        type="button"
+        onClick={onToggle}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 6, width: '100%',
+          background: expanded ? 'var(--studio-panel, #f1ece4)' : 'transparent',
+          border: 'none', borderRadius: 6, padding: '3px 8px', margin: '-3px 0 0 -8px',
+          cursor: 'pointer', color: 'var(--studio-muted, #746b63)', transition: 'background 0.15s',
+          textAlign: 'left',
+        }}
+        onMouseEnter={e => { e.currentTarget.style.background = 'var(--studio-panel, #f1ece4)'; }}
+        onMouseLeave={e => { if (!expanded) e.currentTarget.style.background = 'transparent'; }}
+      >
+        <Text ellipsis style={{ flex: 1, minWidth: 0, color: 'var(--studio-text, #2f2a26)', fontSize: 12, fontWeight: 500 }}>
+          {summaryFor(entry)}
+        </Text>
+        <DownOutlined style={{
+          flexShrink: 0, fontSize: 8, color: 'var(--studio-subtle, #91877e)',
+          transform: expanded ? 'rotate(0deg)' : 'rotate(-90deg)', transition: 'transform 0.15s ease',
+        }} />
+      </button>
+      {expanded && (
+        <div style={{ marginTop: 6 }}>
+          <Body entry={entry} />
         </div>
-        {!isLast && <div style={{ flex: 1, width: 1.5, minHeight: 6, backgroundColor: 'var(--studio-border, #e2dcd4)', marginTop: 2 }} />}
-      </div>
-      <div style={{ flex: 1, minWidth: 0, paddingBottom: isLast ? 2 : 10 }}>
-        <button
-          type="button"
-          onClick={onToggle}
-          style={{
-            display: 'flex', alignItems: 'center', gap: 6, width: '100%',
-            background: expanded ? 'var(--studio-panel, #f1ece4)' : 'transparent',
-            border: 'none', borderRadius: 6, padding: '3px 8px', margin: '-3px 0 0 -8px',
-            cursor: 'pointer', color: 'var(--studio-muted, #746b63)', transition: 'background 0.15s',
-            textAlign: 'left',
-          }}
-          onMouseEnter={e => { e.currentTarget.style.background = 'var(--studio-panel, #f1ece4)'; }}
-          onMouseLeave={e => { if (!expanded) e.currentTarget.style.background = 'transparent'; }}
-        >
-          <Text ellipsis style={{ flex: 1, minWidth: 0, color: 'var(--studio-text, #2f2a26)', fontSize: 12, fontWeight: 500 }}>
-            {summaryFor(entry)}
-          </Text>
-          <DownOutlined style={{
-            flexShrink: 0, fontSize: 8, color: 'var(--studio-subtle, #91877e)',
-            transform: expanded ? 'rotate(0deg)' : 'rotate(-90deg)', transition: 'transform 0.15s ease',
-          }} />
-        </button>
-        {expanded && (
-          <div style={{ marginTop: 6 }}>
-            <Body entry={entry} />
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-/**
- * A single chronological timeline of everything the agent did to produce a
- * response — thinking, context gathering, and tool calls in the order they
- * actually happened, each collapsible. This replaces a previous split
- * timeline/output-pane layout with one linear stream, closer to how Claude's
- * own transcript reads.
- *
- * Props:
- *  - entries: TimelineEntry[] — { id, kind: 'thinking'|'context'|'tool', status, ...kind-specific fields }
- *  - running: whether the agent is still actively producing this message
- */
-export default function ThinkingTimeline({ entries = [], running = false, hasContent = false }) {
-  const [overrides, setOverrides] = useState({});
-
-  // Nothing has streamed in yet — still show an active row (icon, spinner,
-  // connector) instead of a plain, disconnected "thinking" line, so there's
-  // never a dead gap between hitting send and the first visible step. Once
-  // real answer text has started streaming there's no gap left to fill.
-  if (entries.length === 0) {
-    if (!running || hasContent) return null;
-    return (
-      <div style={{ margin: '4px 0 12px' }} aria-label="Agent thinking timeline">
-        <TimelineRow entry={{ id: 'working', kind: 'tool', name: 'working', status: 'running' }} isLast expanded={false} onToggle={() => {}} />
-      </div>
-    );
-  }
-
-  const isExpanded = (entry, isLast) => {
-    if (entry.id in overrides) return overrides[entry.id];
-    return running && isLast;
-  };
-  const toggle = (id, current) => setOverrides(prev => ({ ...prev, [id]: !current }));
-
-  return (
-    <div style={{ margin: '4px 0 12px', display: 'flex', flexDirection: 'column' }} aria-label="Agent thinking timeline">
-      {entries.map((entry, index) => {
-        const isLast = index === entries.length - 1;
-        const expanded = isExpanded(entry, isLast);
-        return (
-          <TimelineRow key={entry.id} entry={entry} isLast={isLast} expanded={expanded} onToggle={() => toggle(entry.id, expanded)} />
-        );
-      })}
+      )}
     </div>
   );
 }

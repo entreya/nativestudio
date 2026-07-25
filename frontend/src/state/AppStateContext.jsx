@@ -69,6 +69,9 @@ export function AppStateProvider({ children }) {
     token: {
       colorPrimary: activeTheme.accent,
       colorInfo: activeTheme.accent,
+      colorSuccess: activeTheme.success,
+      colorWarning: activeTheme.warning,
+      colorError: activeTheme.danger,
       colorBgBase: activeTheme.bg,
       colorBgContainer: activeTheme.surface,
       colorBgElevated: activeTheme.surface,
@@ -183,7 +186,12 @@ export function AppStateProvider({ children }) {
           setIndexStatus(current => ({ ...current, ...data, status: 'running' }));
           if (update.type === 'index_started' && (data.total || 0) > 1) setScanNotificationMinimized(false);
         } else if (update.type === 'index_completed') {
-          setIndexStatus(current => ({ ...current, ...data, status: data.errors ? 'completed_with_errors' : 'completed' }));
+          // The file watcher emits this per single-file save with its own
+          // processed/skipped totals — spreading those would overwrite a full
+          // scan's real progress with "1 file" numbers.
+          if (!data.incremental) {
+            setIndexStatus(current => ({ ...current, ...data, status: data.errors ? 'completed_with_errors' : 'completed' }));
+          }
         } else if (update.type === 'enrichment_queued') {
           setIndexStatus(current => ({ ...current, enrichmentStatus: 'queued', enrichmentRemaining: data.remaining || 0 }));
         } else if (update.type === 'enrichment_started') {
@@ -210,6 +218,12 @@ export function AppStateProvider({ children }) {
           enrichStartTimes.current = {};
         } else if (update.type === 'enrichment_pending_confirmation') {
           setIndexStatus(current => ({ ...current, enrichmentStatus: 'pending_confirmation', enrichmentRemaining: data.remaining || 0 }));
+        } else if (update.type === 'enrichment_declined') {
+          setIndexStatus(current => ({ ...current, enrichmentStatus: 'declined' }));
+        } else if (update.type === 'enrichment_paused') {
+          setIndexStatus(current => ({ ...current, enrichmentStatus: 'paused', enrichmentRemaining: data.remaining ?? current.enrichmentRemaining }));
+        } else if (update.type === 'enrichment_resumed') {
+          setIndexStatus(current => ({ ...current, enrichmentStatus: 'running' }));
         } else if (update.type === 'index_error' && !data.path && !data.stage) {
           setIndexStatus(current => ({ ...current, ...data, status: 'failed' }));
         }
@@ -266,6 +280,35 @@ export function AppStateProvider({ children }) {
     if (!activeProject) return;
     try {
       await fetch(`/api/projects/${activeProject.id}/knowledge/enrichment/approve`, { method: 'POST' });
+    } catch (e) { console.error(e); }
+  }, [activeProject]);
+
+  // "Not now" — dismisses the approval card without cancelling the scan or
+  // the file watcher (unlike stopIndexing, which cancels everything). The
+  // queued jobs stay queued so a later approveEnrichment can still run them.
+  const declineEnrichment = useCallback(async () => {
+    if (!activeProject) return;
+    setIndexStatus(current => ({ ...current, enrichmentStatus: 'declined' }));
+    try {
+      await fetch(`/api/projects/${activeProject.id}/knowledge/enrichment/decline`, { method: 'POST' });
+    } catch (e) { console.error(e); }
+  }, [activeProject]);
+
+  // Pause/resume suspend enrichment between files without cancelling the run,
+  // so the queue survives and resuming continues from where it stopped.
+  const pauseEnrichment = useCallback(async () => {
+    if (!activeProject) return;
+    setIndexStatus(current => ({ ...current, enrichmentStatus: 'paused' }));
+    try {
+      await fetch(`/api/projects/${activeProject.id}/knowledge/enrichment/pause`, { method: 'POST' });
+    } catch (e) { console.error(e); }
+  }, [activeProject]);
+
+  const resumeEnrichment = useCallback(async () => {
+    if (!activeProject) return;
+    setIndexStatus(current => ({ ...current, enrichmentStatus: 'running' }));
+    try {
+      await fetch(`/api/projects/${activeProject.id}/knowledge/enrichment/resume`, { method: 'POST' });
     } catch (e) { console.error(e); }
   }, [activeProject]);
 
@@ -445,7 +488,8 @@ export function AppStateProvider({ children }) {
   };
 
   const handleNavigate = (key) => {
-    if (key === 'conversations') navigate('/conversations');
+    if (key === 'home') navigate('/');
+    else if (key === 'conversations') navigate('/conversations');
     else if (key === 'knowledge' && activeProject) navigate(`/projects/${activeProject.id}/knowledge`);
     else if (key === 'db' && activeProject) navigate(`/projects/${activeProject.id}/db`);
     else if (key === 'settings') {
@@ -482,17 +526,21 @@ export function AppStateProvider({ children }) {
     const enrAgg     = enrStatus === 'aggregating';
     const enrDone    = enrStatus === 'done';
     const enrPending = enrStatus === 'pending_confirmation';
-    if (enrActive || enrAgg || enrDone || enrPending) {
+    const enrPaused  = enrStatus === 'paused';
+    if (enrActive || enrAgg || enrDone || enrPending || enrPaused) {
       const durSec = s.enrichmentDurationMs > 0
         ? (s.enrichmentDurationMs / 1000).toFixed(1) + 's'
         : '—';
       procs.push({
         id: 'enrichment',
         phase: 'enrichment',
-        status: enrPending ? 'pending_confirmation' : ((enrActive || enrAgg) ? 'running' : 'done'),
+        status: enrPending ? 'pending_confirmation' : (enrPaused ? 'paused' : ((enrActive || enrAgg) ? 'running' : 'done')),
+        // Only the per-file enrichment stage can be paused — the aggregation
+        // pass is a single model call with nothing to suspend between.
+        pausable: enrActive,
         label: enrPending
           ? `Ready to build AI knowledge for ${s.enrichmentRemaining || 0} file${s.enrichmentRemaining === 1 ? '' : 's'}`
-          : (enrAgg ? 'Building module summaries' : (enrDone ? 'AI knowledge ready' : 'Enriching AI knowledge')),
+          : (enrPaused ? `Paused — ${s.enrichmentRemaining || 0} file${s.enrichmentRemaining === 1 ? '' : 's'} left` : (enrAgg ? 'Building module summaries' : (enrDone ? 'AI knowledge ready' : 'Enriching AI knowledge'))),
         detail: s.enrichmentPath || '',
         progress: null,     // indeterminate
         stats: enrPending ? {} : {
@@ -521,6 +569,9 @@ export function AppStateProvider({ children }) {
     indexStatus, setIndexStatus, scanNotificationMinimized, setScanNotificationMinimized,
     stopIndexing,
     approveEnrichment,
+    declineEnrichment,
+    pauseEnrichment,
+    resumeEnrichment,
     indexProcesses,
     editorCtx,
     openFiles, activeTab, refreshTrigger, setRefreshTrigger,

@@ -20,6 +20,6 @@
   },
   "filesystem": {
     "root_dir": "./workspace",
-    "allowed_extensions": [".php", ".go", ".mod", ".sum", ".js", ".jsx", ".ts", ".tsx", ".py", ".md", ".json", ".yaml", ".yml", ".sql", ".xml", ".toml"]
+    "allowed_extensions": [".php", ".go", ".mod", ".sum", ".js", ".jsx", ".ts", ".tsx", ".py", ".md", ".json", ".yaml", ".yml", ".sql", ".xml", ".toml", ".txt", ".css", ".scss", ".sass", ".less", ".html", ".htm", ".svg", ".sh", ".bash", ".zsh", ".rb", ".rs", ".java", ".kt", ".swift", ".c", ".h", ".cpp", ".hpp", ".cs", ".vue", ".svelte", ".ini", ".conf", ".cfg", ".env", ".csv", ".tsv", ".log", ".lock", ".gitignore", ".dockerignore", ".editorconfig", ".graphql", ".proto", ".ipynb"]
   }
 }
