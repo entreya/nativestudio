@@ -1,5 +1,7 @@
 const uiFont = 'Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
 const monoFont = '"SFMono-Regular", "Cascadia Code", Menlo, Consolas, monospace';
+const sfFont = '-apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Helvetica Neue", sans-serif';
+const segoeFont = '"Segoe UI Variable", "Segoe UI", "Segoe UI Historic", -apple-system, sans-serif';
 
 const makeTheme = (id, name, pairId, dark, layout, colors, options = {}) => ({
   id, name, pairId, dark, layout,
@@ -32,6 +34,33 @@ export const studioThemes = [
   // 5. Netflix
   makeTheme('netflix-light', 'Netflix Light', 'netflix', false, 'netflix', { bg: '#FFFFFF', surface: '#F3F3F3', panel: '#FFFFFF', border: '#E6E6E6', text: '#333333', muted: '#808080', subtle: '#B3B3B3', accent: '#E50914', accentSoft: '#FCE7E8', success: '#2E7D32', danger: '#B00020', warning: '#B26A00' }, { radius: 4 }),
   makeTheme('netflix-dark', 'Netflix Dark', 'netflix', true, 'netflix', { bg: '#141414', surface: '#141414', panel: '#1F1F1F', border: '#333333', text: '#FFFFFF', muted: '#B3B3B3', subtle: '#808080', accent: '#E50914', accentSoft: '#3D0A0D', success: '#46D369', danger: '#FF6B5E', warning: '#FFC145' }, { radius: 4 }),
+
+  // 6. macOS Glass — real macOS vibrancy (edge-to-edge frosted panels, hairline
+  // dividers, SF font, system blue), not the colorful pink/blue "Glass" theme
+  // above which is a generic glassmorphism look rather than a macOS one.
+  makeTheme('macos-light', 'macOS Light', 'macos', false, 'macos', { bg: '#F5F5F7', surface: 'rgba(255,255,255,0.72)', panel: 'rgba(246,246,246,0.6)', border: 'rgba(0,0,0,0.08)', text: '#1D1D1F', muted: '#6E6E73', subtle: '#86868B', accent: '#007AFF', accentSoft: 'rgba(0,122,255,0.12)', success: '#34C759', danger: '#FF3B30', warning: '#FF9500' }, { font: sfFont, radius: 12 }),
+  makeTheme('macos-dark', 'macOS Dark', 'macos', true, 'macos', { bg: '#1E1E1E', surface: 'rgba(30,30,30,0.72)', panel: 'rgba(40,40,40,0.6)', border: 'rgba(255,255,255,0.09)', text: '#F5F5F7', muted: '#98989D', subtle: '#6E6E73', accent: '#0A84FF', accentSoft: 'rgba(10,132,255,0.16)', success: '#32D74B', danger: '#FF453A', warning: '#FF9F0A' }, { font: sfFont, radius: 12 }),
+
+  // 7. Windows 11 — Fluent/Mica: flat flush panels (no floating cards), thin
+  // dividers, Segoe UI Variable, the 8px corner radius Windows 11 actually uses.
+  makeTheme('win11-light', 'Windows 11 Light', 'win11', false, 'win11', { bg: '#F3F3F3', surface: '#FFFFFF', panel: '#F9F9F9', border: '#E5E5E5', text: '#1A1A1A', muted: '#5D5D5D', subtle: '#8A8A8A', accent: '#0078D4', accentSoft: '#DEECF9', success: '#107C10', danger: '#C42B1C', warning: '#9D5D00' }, { font: segoeFont, radius: 8 }),
+  makeTheme('win11-dark', 'Windows 11 Dark', 'win11', true, 'win11', { bg: '#202020', surface: '#2C2C2C', panel: '#272727', border: '#3B3B3B', text: '#FFFFFF', muted: '#C5C5C5', subtle: '#9C9C9C', accent: '#60CDFF', accentSoft: '#173344', success: '#6CCB5F', danger: '#FF99A4', warning: '#FFB900' }, { font: segoeFont, radius: 8 }),
+
+  // 8. Windows 12 (concept) — Windows 12 isn't an actual released Microsoft
+  // product; this follows the common community-concept direction (more
+  // rounded than Win11, heavier Mica/glass, more vibrant accent) rather than
+  // any confirmed spec.
+  makeTheme('win12-light', 'Windows 12 Light', 'win12', false, 'win12', { bg: '#EFF3FB', surface: 'rgba(255,255,255,0.78)', panel: 'rgba(255,255,255,0.55)', border: 'rgba(0,0,0,0.06)', text: '#141414', muted: '#5B6472', subtle: '#8891A0', accent: '#3E63DD', accentSoft: 'rgba(62,99,221,0.14)', success: '#1F9D55', danger: '#E5484D', warning: '#F5A524' }, { font: segoeFont, radius: 16 }),
+  makeTheme('win12-dark', 'Windows 12 Dark', 'win12', true, 'win12', { bg: '#15161B', surface: 'rgba(24,26,32,0.75)', panel: 'rgba(30,32,40,0.6)', border: 'rgba(255,255,255,0.08)', text: '#F2F3F5', muted: '#A2A8B5', subtle: '#767D8C', accent: '#7B87F5', accentSoft: 'rgba(123,135,245,0.18)', success: '#3DD68C', danger: '#FF6B6B', warning: '#FFB454' }, { font: segoeFont, radius: 16 }),
+
+  // 9. Liquid Glass — Apple's current design language (introduced WWDC June
+  // 2025, mandatory across iOS/iPadOS/macOS by Sept 2026): variable-opacity
+  // (20-80%) refractive glass panels that float above content with rounded,
+  // hardware-matched geometry, a moving specular highlight, and controls
+  // that read as glass rather than flat fills — a real, current Apple
+  // design system, not the 2000s "Aqua" look.
+  makeTheme('liquidglass-light', 'Liquid Glass Light', 'liquidglass', false, 'liquidglass', { bg: '#EDEDF2', surface: 'rgba(255,255,255,0.55)', panel: 'rgba(255,255,255,0.4)', border: 'rgba(255,255,255,0.6)', text: '#1C1C1E', muted: '#6E6E73', subtle: '#8E8E93', accent: '#007AFF', accentSoft: 'rgba(0,122,255,0.16)', success: '#30D158', danger: '#FF453A', warning: '#FF9F0A' }, { font: sfFont, radius: 22 }),
+  makeTheme('liquidglass-dark', 'Liquid Glass Dark', 'liquidglass', true, 'liquidglass', { bg: '#0B0B10', surface: 'rgba(30,30,36,0.55)', panel: 'rgba(28,28,34,0.42)', border: 'rgba(255,255,255,0.14)', text: '#F2F2F7', muted: '#98989D', subtle: '#6E6E73', accent: '#0A84FF', accentSoft: 'rgba(10,132,255,0.22)', success: '#30D158', danger: '#FF453A', warning: '#FFD60A' }, { font: sfFont, radius: 22 }),
 ];
 
 export const getStudioTheme = id => studioThemes.find(theme => theme.id === id) || studioThemes[0];
