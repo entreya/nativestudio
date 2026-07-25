@@ -25,6 +25,8 @@ func (h *KnowledgeHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/projects/{id}/index/status", h.Status)
 	mux.HandleFunc("GET /api/projects/{id}/index/events", h.Events)
 	mux.HandleFunc("POST /api/projects/{id}/index", h.Reindex)
+	mux.HandleFunc("POST /api/projects/{id}/index/stop", h.StopIndex)
+	mux.HandleFunc("POST /api/projects/{id}/knowledge/enrichment/approve", h.ApproveEnrichment)
 	mux.HandleFunc("POST /api/projects/{id}/index/files", h.ReindexFile)
 	mux.HandleFunc("POST /api/projects/{id}/knowledge/relearn", h.Relearn)
 	mux.HandleFunc("PATCH /api/projects/{id}/knowledge/facts/{factID}", h.UpdateFact)
@@ -109,7 +111,8 @@ func (h *KnowledgeHandler) Overview(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, result)
 }
 func (h *KnowledgeHandler) Status(w http.ResponseWriter, r *http.Request) {
-	result, err := h.db.LatestIndexStatus(r.Context(), r.PathValue("id"))
+	workspaceID := r.PathValue("id")
+	result, err := h.db.LatestIndexStatus(r.Context(), workspaceID, h.coordinator.IsEnrichmentApproved(workspaceID))
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
@@ -123,6 +126,14 @@ func (h *KnowledgeHandler) Reindex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.coordinator.Restart(project.ID, project.Path)
+	writeJSON(w, map[string]bool{"ok": true})
+}
+func (h *KnowledgeHandler) StopIndex(w http.ResponseWriter, r *http.Request) {
+	h.coordinator.Cancel()
+	writeJSON(w, map[string]bool{"ok": true})
+}
+func (h *KnowledgeHandler) ApproveEnrichment(w http.ResponseWriter, r *http.Request) {
+	h.coordinator.ApproveEnrichment(r.PathValue("id"))
 	writeJSON(w, map[string]bool{"ok": true})
 }
 func (h *KnowledgeHandler) Relearn(w http.ResponseWriter, r *http.Request) {

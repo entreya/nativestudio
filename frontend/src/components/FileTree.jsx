@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Tree, Typography, Dropdown, Popover, Input, Button } from 'antd';
-import { FolderOutlined, FolderOpenOutlined, FileAddOutlined, FolderAddOutlined } from '@ant-design/icons';
+import { FolderOutlined, FolderOpenOutlined, FileAddOutlined, FolderAddOutlined, PlusSquareOutlined, MinusSquareOutlined, LoadingOutlined } from '@ant-design/icons';
 import { FileTypeIcon } from '../fileIcons';
 
 const { DirectoryTree } = Tree;
@@ -342,6 +342,11 @@ export default function FileTree({ onFileClick, refreshTrigger, onFileRenamed, o
           onSelect={onSelect}
           showIcon
           showLine={{ showLeafIcon: false }}
+          switcherIcon={({ expanded, isLeaf, loading }) => {
+            if (loading) return <LoadingOutlined style={{ color: 'var(--studio-accent, #1677ff)' }} />;
+            if (isLeaf) return null;
+            return expanded ? <MinusSquareOutlined style={{ color: 'var(--studio-muted, #746b63)' }} /> : <PlusSquareOutlined style={{ color: 'var(--studio-muted, #746b63)' }} />;
+          }}
           titleRender={titleRender}
           icon={node => node.type === 'file'
             ? <FileTypeIcon filename={node.title || ''} />

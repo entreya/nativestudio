@@ -20,6 +20,7 @@ export function useEditorContext() {
     recent_files: [],
     cursor: { line: 1, column: 1 },
     selection: null,
+    selectionLength: 0,
     selected_symbol: null,
     recent_edits: [],
   });
@@ -44,15 +45,16 @@ export function useEditorContext() {
     }));
   }, []);
 
-  /** Update selection range and text. Pass null to clear. */
+  /** Update selection range and text. Pass null/empty to clear. */
   const updateSelection = useCallback((startLine, endLine, text) => {
     if (!text || text.trim() === '') {
-      setContext(prev => ({ ...prev, selection: null }));
+      setContext(prev => ({ ...prev, selection: null, selectionLength: 0 }));
       return;
     }
     setContext(prev => ({
       ...prev,
       selection: { start_line: startLine, end_line: endLine, text },
+      selectionLength: text.length,
     }));
   }, []);
 

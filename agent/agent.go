@@ -22,7 +22,7 @@ import (
 
 const assistantSystemPrompt = `You are the coding assistant inside NativeStudio.
 Answer the user in clear natural language, not as JSON. Use the provided tools through native tool calls; never print a tool-call JSON object in the answer.
-Use the active file and editor context when relevant. When the user's request is short or does not name a target (e.g. "explain", "fix this", "refactor", "what does this do"), assume they mean the active file open in the editor and answer about that file — do not ask them to paste code you already have access to; use read_file if you need more of it than is already shown. When a "selected_text" block is present, that is the user's current selection — do not treat it as the whole picture: read the surrounding code in the same active file (the function/class it sits in, its callers, nearby definitions) before answering, since the selection alone is rarely enough to judge correctness, side effects, or naming. CRITICAL: Never write code blocks in the chat response. To edit a file, use replace_in_file or apply_patch. To create a file, use create_file. To remove a file, use delete_file. File mutations are staged for the user to approve or reject. For installing packages, scaffolding a new project/framework (e.g. a Composer or npm package, "yii2-app-basic", a boilerplate), or running build/test commands, use run_command instead of hand-writing the files those tools would generate yourself — you do not reliably know the exact files a framework installer produces, and guessing produces broken projects. run_command is also staged for approval before it runs. Your text response should only explain briefly what you changed and why. If the request is materially ambiguous and choosing incorrectly could change the result, call ask_follow_up directly with one concise question, the appropriate input type, and useful short options. Use multiselect when several answers can apply. Never narrate an instruction such as "Ask the user". If a request depends on unfamiliar or current facts, call search_internet before answering instead of guessing.`
+Use the active file and editor context when relevant. When the user's request is short or does not name a target (e.g. "explain", "fix this", "refactor", "what does this do"), assume they mean the active file open in the editor and answer about that file — do not ask them to paste code you already have access to; use read_file if you need more of it than is already shown. When a "selected_text" block is present, that is the user's current selection — do not treat it as the whole picture: read the surrounding code in the same active file (the function/class it sits in, its callers, nearby definitions) before answering, since the selection alone is rarely enough to judge correctness, side effects, or naming. CRITICAL: Never write code blocks in the chat response. To edit a file, use replace_in_file or apply_patch. To create a file, use create_file. To remove a file, use delete_file. File mutations are staged for the user to approve or reject. For installing packages, scaffolding a new project/framework (e.g. a Composer or npm package, "yii2-app-basic", a boilerplate), or running build/test commands, use run_command instead of hand-writing the files those tools would generate yourself — you do not reliably know the exact files a framework installer produces, and guessing produces broken projects. run_command is also staged for approval before it runs. Your text response should only explain briefly what you changed and why. If the request is materially ambiguous and choosing incorrectly could change the result, call ask_follow_up directly with one concise question, the appropriate input type, and useful short options. Use multiselect when several answers can apply. Never narrate an instruction such as "Ask the user". If a request depends on unfamiliar or current facts, call search_internet before answering instead of guessing. If the user's message is casual conversation — a greeting, a joke, song lyrics, small talk, or anything else unrelated to the code or project — that is not an error, not out of scope, and not something you lack the ability to understand: reply naturally and warmly like a friendly conversational partner, in whatever language or tone they used, then briefly invite them back to the project. For example, if the user sends song lyrics or an unrelated one-liner, a good reply looks like "Haha, love that energy! Whenever you're ready to get back to the project, I'm here." — NOT a request for clarification and NOT an apology. Never refuse, say you're not sure what they mean, or apologize for a harmless message just because it isn't a coding request.`
 
 // Agent orchestrates a multi-step agent run with tool calling.
 type Agent struct {
@@ -84,6 +84,24 @@ func (a *Agent) Run(
 	runID := generateRunID()
 	directConversation := isLightweightConversation(prompt)
 	sessionRecord, _ := a.DB.GetSession(sessionID)
+	// The registry (file tools) and resolver (knowledge search) both hold a
+	// single shared "active workspace" — set whenever a project is opened in
+	// the UI, not per-request. A request for a session whose project isn't
+	// the one currently open (a background/stale browser tab, or another
+	// project opened since this session's conversation started) would
+	// otherwise silently run tools against, and answer from, the wrong
+	// project. Re-sync from the session's actual project before using either.
+	if sessionRecord != nil && sessionRecord.ProjectID != "" {
+		if project, err := a.DB.GetProject(sessionRecord.ProjectID); err == nil {
+			if a.Registry != nil {
+				a.Registry.SetWorkspaceRoot(project.Path)
+			}
+			if a.Resolver != nil {
+				a.Resolver.SetWorkspaceRoot(project.Path)
+				a.Resolver.SetKnowledgeWorkspaceID(project.ID)
+			}
+		}
+	}
 	if !directConversation {
 		emit("agent_start", map[string]any{
 			"run_id":    runID,
@@ -354,26 +372,6 @@ func (a *Agent) Run(
 		if savedAssistant != nil {
 			emit("message_saved", map[string]any{"role": "assistant", "id": savedAssistant.ID})
 		}
-
-		if session, err := a.DB.GetSession(sessionID); err == nil {
-			if directConversation {
-				title, summary := fallbackConversationMetadata(prompt, finalContent)
-				if err := a.DB.UpdateSessionMetadata(sessionID, title, summary); err == nil {
-					emit("session_metadata", map[string]any{"session_id": sessionID, "title": title, "summary": summary})
-				}
-			} else {
-				title, summary, metadataErr := a.generateConversationMetadata(ctx, model, session.Title, session.Summary, prompt, finalContent)
-				if metadataErr != nil {
-					log.Printf("[agent] failed to generate conversation metadata: %v", metadataErr)
-					title, summary = fallbackConversationMetadata(prompt, finalContent)
-				}
-				if err := a.DB.UpdateSessionMetadata(sessionID, title, summary); err != nil {
-					log.Printf("[agent] failed to save conversation metadata: %v", err)
-				} else {
-					emit("session_metadata", map[string]any{"session_id": sessionID, "title": title, "summary": summary})
-				}
-			}
-		}
 	}
 	if sessionRecord != nil && !directConversation {
 		paths := make([]string, 0, len(knowledgeCandidates))
@@ -388,11 +386,45 @@ func (a *Agent) Run(
 		_ = a.DB.RecordSessionLearning(ctx, sessionRecord.ProjectID, sessionID, runID, string(learning), "")
 	}
 
-	// 8. Emit agent done after persistence so message actions have stable IDs.
+	// 8. Emit agent done right after persistence so the UI unlocks (stop
+	// button clears, next input becomes available) as soon as the visible
+	// turn is actually finished — not after also generating a conversation
+	// title/summary, which used to run synchronously here and could leave
+	// the UI looking stuck for as long as that second, invisible model call
+	// took (it competes with the main generation for the same Ollama server).
 	emit("agent_done", map[string]any{
 		"run_id": runID,
 		"steps":  run.Steps,
 	})
+
+	// 9. Update the conversation title/summary in the background. This can
+	// involve a second full model call (generateConversationMetadata), so it
+	// must never block agent_done above. The HTTP handler may already have
+	// returned and flushed its response by the time this finishes, so it
+	// updates the DB directly rather than emitting further SSE events — the
+	// title/summary simply becomes visible next time the session list loads.
+	if finalContent != "" {
+		if session, err := a.DB.GetSession(sessionID); err == nil {
+			go func() {
+				bgCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+				defer cancel()
+				var title, summary string
+				if directConversation {
+					title, summary = fallbackConversationMetadata(prompt, finalContent)
+				} else {
+					var metadataErr error
+					title, summary, metadataErr = a.generateConversationMetadata(bgCtx, model, session.Title, session.Summary, prompt, finalContent)
+					if metadataErr != nil {
+						log.Printf("[agent] failed to generate conversation metadata: %v", metadataErr)
+						title, summary = fallbackConversationMetadata(prompt, finalContent)
+					}
+				}
+				if err := a.DB.UpdateSessionMetadata(sessionID, title, summary); err != nil {
+					log.Printf("[agent] failed to save conversation metadata: %v", err)
+				}
+			}()
+		}
+	}
 
 	return finalContent, nil
 }
@@ -463,9 +495,10 @@ Existing summary: %s
 Latest user message: %s
 Latest assistant response: %s`, currentTitle, currentSummary, truncateRunes(userPrompt, 4000), truncateRunes(assistantResponse, 8000))
 	payload := map[string]any{
-		"model":  model,
-		"stream": false,
-		"format": format,
+		"model":      model,
+		"stream":     false,
+		"format":     format,
+		"keep_alive": ollamaKeepAlive,
 		"messages": []map[string]string{
 			{"role": "system", "content": "Return only the requested JSON conversation metadata."},
 			{"role": "user", "content": prompt},

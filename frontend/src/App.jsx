@@ -10,6 +10,7 @@ const LandingPage = lazy(() => import('./routes/LandingPage'));
 const ConversationsRoute = lazy(() => import('./routes/ConversationsRoute'));
 const EditorPage = lazy(() => import('./routes/EditorPage'));
 const KnowledgePage = lazy(() => import('./routes/KnowledgePage'));
+const DatabasePage = lazy(() => import('./routes/DatabasePage'));
 
 // Applies the active theme once for every route, and renders the single
 // shared WorkspacePickerModal instance (fed entirely from context) so each
@@ -45,6 +46,7 @@ export default function App() {
           <Route path="/projects/:projectId" element={<Suspense fallback={<EditorPageSkeleton />}><EditorPage /></Suspense>} />
           <Route path="/projects/:projectId/files/*" element={<Suspense fallback={<EditorPageSkeleton />}><EditorPage /></Suspense>} />
           <Route path="/projects/:projectId/knowledge" element={<Suspense fallback={<KnowledgePageSkeleton />}><KnowledgePage /></Suspense>} />
+          <Route path="/projects/:projectId/db" element={<Suspense fallback={<KnowledgePageSkeleton />}><DatabasePage /></Suspense>} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </ThemedShell>

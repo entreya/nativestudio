@@ -12,6 +12,15 @@ import (
 	"time"
 )
 
+// ollamaKeepAlive bounds how long Ollama keeps a model resident in memory
+// after the last request. Ollama's own default is 5 minutes; on a machine
+// with 16GB total RAM, a 7GB+ model held resident for hours of back-to-back
+// local development (each request resetting the timer before it ever fires)
+// starves everything else of free memory, forcing heavy swap/compression
+// that shows up as sustained system-wide CPU load and heat unrelated to any
+// single process actually computing.
+const ollamaKeepAlive = "2m"
+
 type statusError struct {
 	status int
 	body   string
@@ -35,6 +44,39 @@ func NewClient(baseURL, summaryModel, embeddingModel string, concurrency int) *C
 	}
 	return &Client{BaseURL: strings.TrimRight(baseURL, "/"), SummaryModel: summaryModel, EmbeddingModel: embeddingModel, HTTP: &http.Client{Timeout: 2 * time.Minute}, semaphore: make(chan struct{}, concurrency)}
 }
+
+// SplitClient satisfies the indexer.ModelService interface by routing
+// embedding calls through a dedicated high-concurrency client while keeping
+// all LLM summarization calls in a separate, rate-limited client.
+// This prevents a bulk embed burst from starving the agent chat loop.
+type SplitClient struct {
+	summary *Client // handles Summarize* calls
+	embed   *Client // handles Embed calls — may have higher concurrency
+}
+
+// NewSplitClient creates a SplitClient. summaryC handles text generation;
+// embedC handles vector embedding and may have a higher concurrency limit.
+func NewSplitClient(summaryC, embedC *Client) *SplitClient {
+	return &SplitClient{summary: summaryC, embed: embedC}
+}
+
+func (s *SplitClient) Embed(ctx context.Context, texts []string) ([][]float32, error) {
+	return s.embed.Embed(ctx, texts)
+}
+func (s *SplitClient) SummarizeSymbol(ctx context.Context, path, name, kind, source string) (string, error) {
+	return s.summary.SummarizeSymbol(ctx, path, name, kind, source)
+}
+func (s *SplitClient) SummarizeFile(ctx context.Context, filePath, language string, symbols []string, chunks []string) (string, error) {
+	return s.summary.SummarizeFile(ctx, filePath, language, symbols, chunks)
+}
+func (s *SplitClient) SummarizeModule(ctx context.Context, module string, fileSummaries []string) (string, error) {
+	return s.summary.SummarizeModule(ctx, module, fileSummaries)
+}
+func (s *SplitClient) SummarizeProject(ctx context.Context, name string, fileSummaries []string) (string, error) {
+	return s.summary.SummarizeProject(ctx, name, fileSummaries)
+}
+
+
 func (c *Client) do(ctx context.Context, path string, payload any, target any) error {
 	select {
 	case c.semaphore <- struct{}{}:
@@ -70,7 +112,7 @@ func (c *Client) Embed(ctx context.Context, texts []string) ([][]float32, error)
 	var response struct {
 		Embeddings [][]float32 `json:"embeddings"`
 	}
-	err := c.do(ctx, "/api/embed", map[string]any{"model": c.EmbeddingModel, "input": texts}, &response)
+	err := c.do(ctx, "/api/embed", map[string]any{"model": c.EmbeddingModel, "input": texts, "keep_alive": ollamaKeepAlive}, &response)
 	if err == nil {
 		if len(response.Embeddings) != len(texts) {
 			return nil, fmt.Errorf("ollama returned %d embeddings for %d inputs", len(response.Embeddings), len(texts))
@@ -86,7 +128,7 @@ func (c *Client) Embed(ctx context.Context, texts []string) ([][]float32, error)
 		var legacy struct {
 			Embedding []float32 `json:"embedding"`
 		}
-		if legacyErr := c.do(ctx, "/api/embeddings", map[string]any{"model": c.EmbeddingModel, "prompt": text}, &legacy); legacyErr != nil {
+		if legacyErr := c.do(ctx, "/api/embeddings", map[string]any{"model": c.EmbeddingModel, "prompt": text, "keep_alive": ollamaKeepAlive}, &legacy); legacyErr != nil {
 			return nil, legacyErr
 		}
 		vectors = append(vectors, legacy.Embedding)
@@ -101,7 +143,7 @@ type structuredResponse struct {
 }
 
 func (c *Client) structured(ctx context.Context, prompt string, schema map[string]any, target any) error {
-	payload := map[string]any{"model": c.SummaryModel, "stream": false, "format": schema, "messages": []map[string]string{{"role": "system", "content": "Return only valid JSON matching the supplied schema. Describe concrete observed behavior; never invent facts."}, {"role": "user", "content": prompt}}, "options": map[string]any{"temperature": 0.1, "num_predict": 1200}}
+	payload := map[string]any{"model": c.SummaryModel, "stream": false, "format": schema, "keep_alive": ollamaKeepAlive, "messages": []map[string]string{{"role": "system", "content": "Return only valid JSON matching the supplied schema. Describe concrete observed behavior; never invent facts."}, {"role": "user", "content": prompt}}, "options": map[string]any{"temperature": 0.1, "num_predict": 1200}}
 	for attempt := 0; attempt < 2; attempt++ {
 		var response structuredResponse
 		if err := c.do(ctx, "/api/chat", payload, &response); err != nil {

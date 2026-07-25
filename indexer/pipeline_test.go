@@ -57,6 +57,10 @@ func TestStructuralIndexCompletesWhileModelEnrichmentIsBlocked(t *testing.T) {
 	coordinator := &Coordinator{DB: database, Scanner: Scanner{Config: DefaultScanConfig()}, Parser: TreeSitterParser{Fallback: StructuralParser{}}, Chunker: SymbolChunker{}, Models: models, SummaryModel: "summary", EmbeddingModel: "embed", BatchSize: 2, Broker: broker}
 	coordinator.Start(project.ID, root)
 	defer coordinator.Cancel()
+	// Enrichment now waits for explicit user approval before it processes
+	// any job — approve up front so this test can still exercise "structural
+	// indexing doesn't wait on slow/blocked enrichment" as originally intended.
+	coordinator.ApproveEnrichment(project.ID)
 
 	deadline := time.After(3 * time.Second)
 	completed := false
@@ -176,6 +180,9 @@ func TestRunningEnrichmentJobResumesAfterCoordinatorRestart(t *testing.T) {
 	coordinator := &Coordinator{DB: database, Scanner: scanner, Parser: parser, Chunker: SymbolChunker{}, Models: fakeModels{}, SummaryModel: "summary", EmbeddingModel: "embed", BatchSize: 2, Broker: broker}
 	coordinator.Start(project.ID, root)
 	defer coordinator.Cancel()
+	// Approve enrichment so the pre-queued (interrupted) job actually resumes —
+	// enrichment now waits for explicit approval before draining the queue.
+	coordinator.ApproveEnrichment(project.ID)
 	waitForEvent(t, events, "enrichment_progress")
 	var status string
 	if err := database.QueryRow(`SELECT status FROM index_jobs WHERE id=?`, claimed.ID).Scan(&status); err != nil {

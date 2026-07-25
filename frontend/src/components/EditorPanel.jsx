@@ -1,18 +1,11 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import Editor from '@monaco-editor/react';
-import { Typography, theme } from 'antd';
+import { Typography, theme, Skeleton } from 'antd';
 import { fontFamilyValue, DEFAULT_FONT_SETTINGS } from '../state/fontSettings';
 
 const { Text } = Typography;
 const { useToken } = theme;
 
-const languageMap = {
-  '.js': 'javascript', '.jsx': 'javascript',
-  '.ts': 'typescript', '.tsx': 'typescript',
-  '.json': 'json', '.html': 'html', '.css': 'css',
-  '.go': 'go', '.py': 'python', '.php': 'php',
-  '.md': 'markdown'
-};
 
 /**
  * EditorPanel renders a Monaco editor for the given file path.
@@ -38,10 +31,12 @@ export default function EditorPanel({
   onEdit,
   initialCursor,
   fontSettings = DEFAULT_FONT_SETTINGS,
+  editorSettings = {},
 }) {
   const [content, setContent] = useState('');
   const [unsaved, setUnsaved] = useState(false);
   const [loadError, setLoadError] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
   const editorRef = useRef(null);
   const { token } = useToken();
   // Track the previous word to avoid firing onSymbolChange for unchanged words.
@@ -80,6 +75,10 @@ export default function EditorPanel({
   useEffect(() => {
     if (filepath) {
       let cancelled = false;
+      setIsLoading(true);
+      setContent('');
+      setLoadError('');
+
       fetch(`/api/file?path=${encodeURIComponent(filepath)}`)
         .then(async res => {
           if (!res.ok) throw new Error((await res.text()) || `Could not read file (${res.status})`);
@@ -97,6 +96,10 @@ export default function EditorPanel({
           if (cancelled) return;
           console.error(err);
           setLoadError(err.message || 'Could not load this file.');
+          setContent('');
+        })
+        .finally(() => {
+          if (!cancelled) setIsLoading(false);
         });
       return () => { cancelled = true; };
     }
@@ -230,8 +233,27 @@ export default function EditorPanel({
     setUnsaved(true);
   };
 
-  const ext = filepath ? filepath.substring(filepath.lastIndexOf('.')) : '';
-  const lang = languageMap[ext] || 'plaintext';
+  const editorOptions = useMemo(() => ({
+    minimap: { enabled: editorSettings.minimap ?? false },
+    stickyScroll: { enabled: true },
+    wordWrap: editorSettings.wordWrap ?? 'on',
+    bracketPairColorization: { enabled: editorSettings.bracketPairColorization ?? true },
+    formatOnPaste: true,
+    formatOnType: editorSettings.formatOnType ?? true,
+    smoothScrolling: editorSettings.smoothScrolling ?? true,
+    cursorBlinking: editorSettings.cursorBlinking ?? 'smooth',
+    renderLineHighlight: editorSettings.renderLineHighlight ?? 'all',
+    renderWhitespace: editorSettings.renderWhitespace ?? 'none',
+    autoClosingBrackets: editorSettings.autoClosingBrackets ?? 'always',
+    codeLens: editorSettings.codeLens ?? true,
+    linkedEditing: editorSettings.linkedEditing ?? true,
+    matchBrackets: editorSettings.matchBrackets ?? 'always',
+    fontFamily: fontFamilyValue(fontSettings.fontFamilyId),
+    fontSize: fontSettings.fontSize,
+    lineHeight: Math.round(fontSettings.fontSize * fontSettings.lineHeight),
+    letterSpacing: fontSettings.letterSpacing,
+    fontLigatures: fontSettings.ligatures,
+  }), [editorSettings, fontSettings]);
 
   return (
     <div style={{ width: '100%', height: '100%', display: 'flex', flexDirection: 'column' }}>
@@ -242,23 +264,22 @@ export default function EditorPanel({
       )}
       {loadError && <Text style={{ padding: '6px 16px', color: token.colorError, fontSize: 12 }}>{loadError}</Text>}
       <div style={{ flex: 1, minHeight: 0, height: '100%' }}>
-        <Editor
-          key={filepath}
-          height="100%"
-          language={lang}
-          theme={darkMode ? 'vs-dark' : 'vs'}
-          value={content}
-          onChange={onChange}
-          onMount={handleEditorMount}
-          options={{
-            minimap: { enabled: false },
-            fontFamily: fontFamilyValue(fontSettings.fontFamilyId),
-            fontSize: fontSettings.fontSize,
-            lineHeight: Math.round(fontSettings.fontSize * fontSettings.lineHeight),
-            letterSpacing: fontSettings.letterSpacing,
-            fontLigatures: fontSettings.ligatures,
-          }}
-        />
+        {isLoading ? (
+          <div style={{ padding: '24px' }}>
+            <Skeleton active paragraph={{ rows: 12 }} />
+          </div>
+        ) : (
+          <Editor
+            key={filepath}
+            height="100%"
+            path={filepath}
+            theme={darkMode ? 'vs-dark' : 'vs'}
+            value={content}
+            onChange={onChange}
+            onMount={handleEditorMount}
+            options={editorOptions}
+          />
+        )}
       </div>
     </div>
   );

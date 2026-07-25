@@ -193,7 +193,7 @@ export default function ProjectKnowledgePage({ project, onOpenFile, onBack, onRe
       {error && <Alert type="error" showIcon message={error} style={{ maxWidth: 1180, margin: '0 auto 16px' }} />}
 
       <section className="knowledge-summary-row">
-        <Card className="knowledge-detected" size="small" title="Detected project">
+        <Card className="bento-card knowledge-detected" size="small" title="Detected project" bordered={false}>
           {knowledge?.project_summary ? <Space direction="vertical" size={6} style={{ width: '100%' }}>
             <Space wrap align="baseline">
               <Text strong style={{ fontSize: 16 }}>{projectSummary.project_name || project?.name}</Text>
@@ -206,7 +206,7 @@ export default function ProjectKnowledgePage({ project, onOpenFile, onBack, onRe
             </Space>
           </Space> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Project summary will appear after indexing" />}
         </Card>
-        <Card className="knowledge-status" size="small" title="Index status" extra={<Tag color={status.status === 'running' ? 'processing' : status.errors ? 'warning' : 'success'}>{status.status || 'not indexed'}</Tag>}>
+        <Card className="bento-card knowledge-status" size="small" title="Index status" bordered={false} extra={<Tag color={status.status === 'running' ? 'processing' : status.errors ? 'warning' : 'success'}>{status.status || 'not indexed'}</Tag>}>
           <div className="knowledge-stat-inline">
             <Statistic title="Files" value={knowledge?.indexed_files || 0} prefix={<FileSearchOutlined />} />
             <Statistic title="Symbols" value={knowledge?.symbol_count || 0} prefix={<CodeOutlined />} />
@@ -219,7 +219,7 @@ export default function ProjectKnowledgePage({ project, onOpenFile, onBack, onRe
       </section>
 
       <section className="knowledge-detail">
-        <Tabs items={tabItems} />
+        <Tabs items={tabItems} type="card" className="pill-tabs" />
       </section>
 
       <Modal open={settingsOpen} title="Repository indexing settings" okText="Save settings" onOk={saveSettings} onCancel={() => setSettingsOpen(false)}>

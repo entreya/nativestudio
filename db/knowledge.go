@@ -533,7 +533,25 @@ func (d *DB) FileSummaries(ctx context.Context, workspaceID string, limit int) (
 	return result, rows.Err()
 }
 
-func (d *DB) LatestIndexStatus(ctx context.Context, workspaceID string) (knowledge.IndexStatus, error) {
+// FileSummaryByHash returns the active file summary for a specific content hash,
+// or nil if none exists. Used by the enrichment worker pool to skip re-summarizing
+// files that have already been summarized for this exact content hash.
+func (d *DB) FileSummaryByHash(ctx context.Context, workspaceID, path, contentHash string) (*knowledge.FileSummary, error) {
+	var item knowledge.FileSummary
+	err := d.QueryRowContext(ctx, `SELECT id,path,summary,content_hash,version,model,status
+		FROM file_summaries WHERE workspace_id=? AND path=? AND content_hash=? AND status='active'
+		LIMIT 1`, workspaceID, path, contentHash).
+		Scan(&item.ID, &item.Path, &item.Summary, &item.ContentHash, &item.Version, &item.Model, &item.Status)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &item, nil
+}
+
+func (d *DB) LatestIndexStatus(ctx context.Context, workspaceID string, enrichmentApproved bool) (knowledge.IndexStatus, error) {
 	var item knowledge.IndexStatus
 	item.WorkspaceID = workspaceID
 	err := d.QueryRowContext(ctx, `SELECT id,status,processed,total,skipped,errors,started_at,completed_at,error FROM indexing_runs WHERE workspace_id=? ORDER BY started_at DESC LIMIT 1`, workspaceID).
@@ -546,9 +564,22 @@ func (d *DB) LatestIndexStatus(ctx context.Context, workspaceID string) (knowled
 		return item, err
 	}
 	item.EnrichmentRemaining, _ = d.PendingIndexJobCount(ctx, workspaceID, "file_enrichment")
-	if item.EnrichmentRemaining > 0 {
+	switch {
+	case item.Status == "cancelled" && item.EnrichmentRemaining > 0:
+		// The scan and enrichment loop share one cancellation context (see
+		// Coordinator.Cancel), so a cancelled scan run with leftover queued
+		// enrichment jobs means enrichment stopped too — report that instead
+		// of falsely claiming "running" forever just because unclaimed jobs
+		// are still sitting in the queue (they'll resume on the next index run).
+		item.EnrichmentStatus = "cancelled"
+	case item.EnrichmentRemaining > 0 && !enrichmentApproved:
+		// Jobs are queued but the coordinator is holding off starting the AI
+		// model calls until the user explicitly approves — see
+		// Coordinator.ApproveEnrichment.
+		item.EnrichmentStatus = "pending_confirmation"
+	case item.EnrichmentRemaining > 0:
 		item.EnrichmentStatus = "running"
-	} else {
+	default:
 		item.EnrichmentStatus = "completed"
 	}
 	return item, nil
@@ -579,7 +610,11 @@ func (d *DB) KnowledgeOverview(ctx context.Context, workspaceID string) (knowled
 	if d.QueryRowContext(ctx, `SELECT id,summary,source_hash,version,model,status FROM project_summaries WHERE workspace_id=? AND status='active' ORDER BY updated_at DESC LIMIT 1`, workspaceID).Scan(&ps.ID, &ps.Summary, &ps.SourceHash, &ps.Version, &ps.Model, &ps.Status) == nil {
 		result.Project = &ps
 	}
-	result.Status, _ = d.LatestIndexStatus(ctx, workspaceID)
+	// KnowledgeOverview has no coordinator reference to check approval state;
+	// approximating false here just means this summary view's status field
+	// may lag one step behind the polled /index/status endpoint, which is
+	// the actual source of truth the frontend uses to drive the approval UI.
+	result.Status, _ = d.LatestIndexStatus(ctx, workspaceID, false)
 	result.Facts, _ = d.ListFacts(ctx, workspaceID)
 	result.Symbols, _ = d.ListImportantSymbols(ctx, workspaceID, 100)
 	result.Decisions, _ = d.ListDecisions(ctx, workspaceID)

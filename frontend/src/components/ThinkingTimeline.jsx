@@ -17,7 +17,6 @@ import {
   CloseCircleFilled,
   LoadingOutlined,
   DownOutlined,
-  RightOutlined,
 } from '@ant-design/icons';
 
 const { Text } = Typography;
@@ -75,6 +74,8 @@ function summaryFor(entry) {
   // kind === 'tool'
   const { name, input, output, status, error } = entry;
   switch (name) {
+    case 'working':
+      return 'Working…';
     case 'find_files': {
       const q = input?.query ? `"${input.query}"` : '';
       if (status !== 'done') return `Searching files for ${q}`;
@@ -277,41 +278,58 @@ function ToolBody({ entry }) {
 
 const KIND_BODY = { thinking: ThinkingBody, context: ContextBody, tool: ToolBody };
 
-// ICON_COLUMN is the width reserved for the icon/connector column; the line
-// (drawn once for the whole timeline, not per-row — see ThinkingTimeline)
-// sits at its horizontal center.
+// ICON_COLUMN is the diameter of each step marker; a continuous rail connects
+// marker centers top to bottom, the way a git-log graph or an activity feed
+// reads — one glance shows the run as a sequence, not a pile of loose chips.
 const ICON_COLUMN = 18;
 
-function TimelineRow({ entry, isFirst, isLast, expanded, onToggle }) {
-  const Icon = iconFor(entry);
+function TimelineRow({ entry, isLast, expanded, onToggle }) {
   const color = colorFor(entry);
+  const Icon = iconFor(entry);
   const Body = KIND_BODY[entry.kind] || ToolBody;
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: `${ICON_COLUMN}px 1fr`, gap: 8 }}>
-      <div style={{ display: 'flex', justifyContent: 'center' }}>
-        {/* A solid-background wrapper masks the single continuous connector
-            line (drawn once behind the whole timeline) where it passes
-            behind this icon, top and bottom. */}
-        <span style={{ position: 'relative', zIndex: 1, marginTop: 2, padding: '3px 0', background: 'var(--studio-bg, #f7f4ed)' }}>
+    <div style={{ display: 'flex', gap: 8 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: ICON_COLUMN, flexShrink: 0 }}>
+        <div style={{
+          width: ICON_COLUMN, height: ICON_COLUMN, borderRadius: '50%', flexShrink: 0,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          backgroundColor: 'var(--studio-bg, #f7f4ed)', border: `1.5px solid ${color}`,
+        }}>
           {/* eslint-disable-next-line react-hooks/static-components -- Icon is
               picked from a fixed table of module-level icon components keyed
               by entry status/kind/name, not created fresh each render; the
               rule can't see through iconFor() to know that. */}
-          <Icon spin={entry.status === 'running'} style={{ color, fontSize: 12, display: 'block' }} />
-        </span>
+          <Icon spin={entry.status === 'running'} style={{ color, fontSize: 8.5 }} />
+        </div>
+        {!isLast && <div style={{ flex: 1, width: 1.5, minHeight: 6, backgroundColor: 'var(--studio-border, #e2dcd4)', marginTop: 2 }} />}
       </div>
-      <div style={{ minWidth: 0, paddingTop: isFirst ? 0 : 2, paddingBottom: isLast ? 0 : 11 }}>
+      <div style={{ flex: 1, minWidth: 0, paddingBottom: isLast ? 2 : 10 }}>
         <button
           type="button"
           onClick={onToggle}
-          style={{ display: 'flex', alignItems: 'center', gap: 5, width: '100%', textAlign: 'left', background: 'transparent', border: 0, padding: '2px 0', cursor: 'pointer' }}
+          style={{
+            display: 'flex', alignItems: 'center', gap: 6, width: '100%',
+            background: expanded ? 'var(--studio-panel, #f1ece4)' : 'transparent',
+            border: 'none', borderRadius: 6, padding: '3px 8px', margin: '-3px 0 0 -8px',
+            cursor: 'pointer', color: 'var(--studio-muted, #746b63)', transition: 'background 0.15s',
+            textAlign: 'left',
+          }}
+          onMouseEnter={e => { e.currentTarget.style.background = 'var(--studio-panel, #f1ece4)'; }}
+          onMouseLeave={e => { if (!expanded) e.currentTarget.style.background = 'transparent'; }}
         >
-          {expanded ? <DownOutlined style={{ fontSize: 9, color: 'var(--studio-subtle, #91877e)', flexShrink: 0 }} /> : <RightOutlined style={{ fontSize: 9, color: 'var(--studio-subtle, #91877e)', flexShrink: 0 }} />}
-          <Text style={{ color: 'var(--studio-muted, #746b63)', fontSize: 11.5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+          <Text ellipsis style={{ flex: 1, minWidth: 0, color: 'var(--studio-text, #2f2a26)', fontSize: 12, fontWeight: 500 }}>
             {summaryFor(entry)}
           </Text>
+          <DownOutlined style={{
+            flexShrink: 0, fontSize: 8, color: 'var(--studio-subtle, #91877e)',
+            transform: expanded ? 'rotate(0deg)' : 'rotate(-90deg)', transition: 'transform 0.15s ease',
+          }} />
         </button>
-        {expanded && <div style={{ marginTop: 4 }}><Body entry={entry} /></div>}
+        {expanded && (
+          <div style={{ marginTop: 6 }}>
+            <Body entry={entry} />
+          </div>
+        )}
       </div>
     </div>
   );
@@ -339,7 +357,7 @@ export default function ThinkingTimeline({ entries = [], running = false, hasCon
     if (!running || hasContent) return null;
     return (
       <div style={{ margin: '4px 0 12px' }} aria-label="Agent thinking timeline">
-        <TimelineRow entry={{ id: 'working', kind: 'tool', name: 'working', status: 'running' }} isFirst isLast expanded={false} onToggle={() => {}} />
+        <TimelineRow entry={{ id: 'working', kind: 'tool', name: 'working', status: 'running' }} isLast expanded={false} onToggle={() => {}} />
       </div>
     );
   }
@@ -351,19 +369,12 @@ export default function ThinkingTimeline({ entries = [], running = false, hasCon
   const toggle = (id, current) => setOverrides(prev => ({ ...prev, [id]: !current }));
 
   return (
-    <div style={{ margin: '4px 0 12px', position: 'relative' }} aria-label="Agent thinking timeline">
-      {/* One continuous connector line behind every icon, instead of a
-          separate segment per row — guaranteed gap-free regardless of how
-          tall an expanded entry's body renders. */}
-      {entries.length > 1 && (
-        <span style={{ position: 'absolute', left: (ICON_COLUMN - 1) / 2, top: 8, bottom: 8, width: 1, background: 'var(--studio-border, #d8d1c5)' }} />
-      )}
+    <div style={{ margin: '4px 0 12px', display: 'flex', flexDirection: 'column' }} aria-label="Agent thinking timeline">
       {entries.map((entry, index) => {
-        const isFirst = index === 0;
         const isLast = index === entries.length - 1;
         const expanded = isExpanded(entry, isLast);
         return (
-          <TimelineRow key={entry.id} entry={entry} isFirst={isFirst} isLast={isLast} expanded={expanded} onToggle={() => toggle(entry.id, expanded)} />
+          <TimelineRow key={entry.id} entry={entry} isLast={isLast} expanded={expanded} onToggle={() => toggle(entry.id, expanded)} />
         );
       })}
     </div>

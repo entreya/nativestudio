@@ -85,6 +85,14 @@ type AgentRun struct {
 // DefaultMaxSteps is the maximum number of tool-call iterations before the agent stops.
 const DefaultMaxSteps = 15
 
+// ollamaKeepAlive bounds how long Ollama keeps a model resident in memory
+// after the last request (Ollama's own default is 5 minutes). On a 16GB
+// machine, a 7GB+ model held resident for hours of back-to-back local
+// development — each request resetting the timer before it ever fires —
+// starves everything else of free memory, forcing heavy swap/compression
+// that shows up as sustained system-wide CPU load and heat.
+const ollamaKeepAlive = "2m"
+
 // Step executes one iteration of the agent loop:
 // 1. Sends messages to Ollama with tool definitions
 // 2. Streams the response
@@ -114,9 +122,10 @@ func (run *AgentRun) Step(
 
 	// Build Ollama request
 	ollamaReq := map[string]any{
-		"model":    run.Model,
-		"messages": messages,
-		"stream":   true,
+		"model":      run.Model,
+		"messages":   messages,
+		"stream":     true,
+		"keep_alive": ollamaKeepAlive,
 	}
 	if !run.Direct {
 		ollamaReq["tools"] = registry.OllamaDefinitions()
@@ -385,13 +394,35 @@ func normalizeThinkLevel(level string) string {
 	}
 }
 
-func supportsNativeThinking(model string) bool {
-	base := strings.SplitN(strings.ToLower(model), ":", 2)[0]
+// customThinkingModels lists locally `ollama create`d models (name:tag) whose
+// FROM base isn't reflected in their own name, so the prefix check below
+// can't see it — nativestudio:coder is FROM qwen3:4b, which does support
+// thinking. Named exactly rather than by a blanket "nativestudio" prefix so
+// other custom models (e.g. nativestudio:max, built on a non-thinking base)
+// aren't misreported as thinking-capable too.
+var customThinkingModels = map[string]bool{
+	"nativestudio:coder": true,
+}
+
+// SupportsNativeThinking reports whether the given Ollama model name supports
+// the native thinking/reasoning trace feature (the `think` request field).
+// The check is name-based because Ollama does not yet expose a stable
+// capabilities field across all versions — this mirrors the same rule used
+// inside the agent loop and is the single source of truth for the whole app.
+func SupportsNativeThinking(model string) bool {
+	lower := strings.ToLower(model)
+	if customThinkingModels[lower] {
+		return true
+	}
+	base := strings.SplitN(lower, ":", 2)[0]
 	return strings.HasPrefix(base, "qwen3") ||
 		strings.HasPrefix(base, "deepseek-r1") ||
 		strings.HasPrefix(base, "deepseek-v3.1") ||
 		strings.HasPrefix(base, "gpt-oss")
 }
+
+// supportsNativeThinking is the package-private alias used inside the loop.
+func supportsNativeThinking(model string) bool { return SupportsNativeThinking(model) }
 
 func parseNarratedFollowUp(content string) (map[string]any, bool) {
 	trimmed := strings.TrimSpace(content)

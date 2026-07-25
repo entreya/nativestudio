@@ -25,19 +25,23 @@ import (
 
 // Config represents the application configuration
 type Config struct {
-	Host                 string `json:"host"`
-	Port                 int    `json:"port"`
-	OllamaURL            string `json:"ollama_url"`
-	DBPath               string `json:"db_path"`
-	DefaultModel         string `json:"default_model"`
-	ChatModel            string `json:"chat_model"`
-	SummaryModel         string `json:"summary_model"`
-	EmbeddingModel       string `json:"embedding_model"`
-	IndexBatchSize       int    `json:"index_batch_size"`
-	MaximumFileSizeBytes int64  `json:"maximum_file_size_bytes"`
-	OllamaConcurrency    int    `json:"ollama_concurrency"`
-	MaxAgentToolSteps    int    `json:"max_agent_tool_steps"`
-	Context              struct {
+	Host                  string `json:"host"`
+	Port                  int    `json:"port"`
+	OllamaURL             string `json:"ollama_url"`
+	DBPath                string `json:"db_path"`
+	DefaultModel          string `json:"default_model"`
+	ChatModel             string `json:"chat_model"`
+	SummaryModel          string `json:"summary_model"`
+	EmbeddingModel        string `json:"embedding_model"`
+	IndexBatchSize        int    `json:"index_batch_size"`
+	MaximumFileSizeBytes  int64  `json:"maximum_file_size_bytes"`
+	OllamaConcurrency     int    `json:"ollama_concurrency"`
+	// EmbeddingConcurrency controls how many parallel embedding calls the indexer
+	// may make. Defaults to 4 when unset. Kept separate from OllamaConcurrency
+	// so the agent loop is not starved by a bulk embed burst.
+	EmbeddingConcurrency  int    `json:"embedding_concurrency"`
+	MaxAgentToolSteps     int    `json:"max_agent_tool_steps"`
+	Context struct {
 		YellowThreshold     float64 `json:"yellow_threshold"`
 		RedThreshold        float64 `json:"red_threshold"`
 		KeepRecentMessages  int     `json:"keep_recent_messages"`
@@ -115,7 +119,18 @@ func main() {
 	if cfg.EmbeddingModel == "" {
 		cfg.EmbeddingModel = "nomic-embed-text"
 	}
-	modelClient := ollamaclient.NewClient(cfg.OllamaURL, cfg.SummaryModel, cfg.EmbeddingModel, cfg.OllamaConcurrency)
+	// embeddingConcurrency defaults to 4: embedding calls are cheap (no
+	// generation) and benefit from higher parallelism during bulk indexing.
+	embedConcurrency := cfg.EmbeddingConcurrency
+	if embedConcurrency <= 0 {
+		embedConcurrency = 4
+	}
+	// Two separate clients: the summary client is throttled by OllamaConcurrency
+	// to avoid starving the agent loop; the embed client can run wider.
+	summaryClient := ollamaclient.NewClient(cfg.OllamaURL, cfg.SummaryModel, cfg.EmbeddingModel, cfg.OllamaConcurrency)
+	embedClient := ollamaclient.NewClient(cfg.OllamaURL, cfg.SummaryModel, cfg.EmbeddingModel, embedConcurrency)
+	// Compose into a single ModelService implementation for the coordinator.
+	modelClient := ollamaclient.NewSplitClient(summaryClient, embedClient)
 	scanConfig := indexer.DefaultScanConfig()
 	if cfg.MaximumFileSizeBytes > 0 {
 		scanConfig.MaximumFileSizeBytes = cfg.MaximumFileSizeBytes
@@ -146,12 +161,18 @@ func main() {
 	sessionsHandler.RegisterRoutes(mux)
 	knowledgeHandler := handlers.NewKnowledgeHandler(database, indexCoordinator, indexBroker)
 	knowledgeHandler.RegisterRoutes(mux)
+
+	settingsHandler := handlers.NewSettingsHandler(filepath.Join("data", ".nativestudio_settings.json"))
+	settingsHandler.RegisterRoutes(mux)
+
 	changesHandler := handlers.NewChangesHandler(database, indexCoordinator)
 	changesHandler.RegisterRoutes(mux)
 	patchHandler := handlers.NewPatchHandler(database, indexCoordinator)
 	patchHandler.RegisterRoutes(mux)
 	commandHandler := handlers.NewCommandHandler(database, indexCoordinator)
 	commandHandler.RegisterRoutes(mux)
+	databaseHandler := handlers.NewDatabaseHandler(database)
+	databaseHandler.RegisterRoutes(mux)
 
 	// Serve static frontend files (from the React build). The frontend is a
 	// client-routed SPA (react-router), so any path that isn't a real file in
