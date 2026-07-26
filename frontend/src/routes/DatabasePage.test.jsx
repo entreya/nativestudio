@@ -1,7 +1,7 @@
 import React from 'react';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import DatabasePage from './DatabasePage';
 
 const activeProject = { id: 'p1', name: 'sample', path: '/tmp/sample' };
@@ -28,18 +28,14 @@ vi.mock('../hooks/useRouteSync', () => ({
 }));
 
 describe('DatabasePage', () => {
-  beforeEach(() => {
-    // Never resolves during the test — this is the regression scenario:
-    // the component must render its very first pass (tables still at its
-    // initial null value, before any fetch has settled) without throwing.
-    globalThis.fetch = vi.fn(() => new Promise(() => {}));
-  });
-
-  it('renders the metric cards on first paint, before the tables fetch resolves', () => {
+  it('renders on first paint without throwing, before the tables fetch resolves', () => {
     // Live bug: tables starts as null (distinguishing "not fetched yet" from
-    // "fetched, genuinely empty"), but the Total Tables card read
-    // tables.length directly with no guard, crashing this very first render
-    // and unmounting the whole page. render() must not throw.
+    // "fetched, genuinely empty"), and a metric card once read tables.length
+    // directly with no guard, crashing this very first render and unmounting
+    // the whole page. render() must not throw — a fetch that never resolves
+    // is exactly the window during which that crash happened.
+    globalThis.fetch = vi.fn(() => new Promise(() => {}));
+
     expect(() =>
       render(
         <MemoryRouter initialEntries={['/projects/p1/db']}>
@@ -48,7 +44,31 @@ describe('DatabasePage', () => {
       )
     ).not.toThrow();
 
-    expect(screen.getByText('Total Tables')).toBeInTheDocument();
-    expect(screen.getByText('Rows in Table')).toBeInTheDocument();
+    expect(screen.getByText('Database Dashboard')).toBeInTheDocument();
+  });
+
+  it('opens the first table as a tab once the table list loads', async () => {
+    globalThis.fetch = vi.fn((url) => {
+      if (url.includes('/db/tables/')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ columns: [{ name: 'id', type: 'TEXT' }], rows: [{ id: '1' }], total_rows: 1 }),
+        });
+      }
+      if (url.includes('/db/tables')) {
+        return Promise.resolve({ ok: true, json: async () => ['sessions', 'messages'] });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+
+    render(
+      <MemoryRouter initialEntries={['/projects/p1/db']}>
+        <DatabasePage />
+      </MemoryRouter>
+    );
+
+    // Auto-opens "sessions" (the first table) as a closable tab.
+    await waitFor(() => expect(screen.getAllByText('sessions').length).toBeGreaterThan(0));
+    expect(screen.getAllByRole('button', { name: /New Query/i }).length).toBeGreaterThan(0);
   });
 });

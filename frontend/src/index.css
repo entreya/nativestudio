@@ -713,12 +713,18 @@ button, input, textarea { font: inherit; }
   font-weight: 500;
 }
 
-.db-premium-table .ant-table-wrapper {
+.db-premium-table {
   background: var(--studio-surface, #fffdf8);
   border: 1px solid var(--studio-border, #e2dcd4);
   border-radius: 12px;
   overflow: hidden;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.02);
+}
+.db-premium-table .ant-table-wrapper {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
 }
 .db-premium-table .ant-table-thead > tr > th {
   background: rgba(0,0,0,0.02) !important;
@@ -740,5 +746,79 @@ button, input, textarea { font: inherit; }
 }
 .db-animate-in {
   animation: db-slide-in 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+/* The tabs area of the Database Explorer needs to actually fill the
+   remaining page height so its inner Table can scroll internally instead
+   of pushing the whole page — Ant Design's Tabs doesn't flex-fill this by
+   default, only its immediate wrapper does. */
+.db-tabs {
+  height: 100%;
+}
+.db-tabs .ant-tabs-content-holder,
+.db-tabs .ant-tabs-content,
+.db-tabs .ant-tabs-tabpane {
+  height: 100%;
+}
+.db-tabs .ant-tabs-tabpane {
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Query Builder filter rows — pill field + square operator button + pill
+   value, all inside one rounded card, modeled after a condition-builder
+   pattern (field / operator-icon / value / delete) rather than a flat row
+   of plain dropdowns. */
+.qb-filter-row {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+  background: var(--studio-surface, #fffdf8);
+  border: 1px solid var(--studio-border, #e2dcd4);
+  border-radius: 12px;
+  padding: 2px 8px 2px 4px;
+  gap: 4px;
+}
+.qb-filter-field {
+  flex: 1;
+  min-width: 130px;
+}
+.qb-filter-row .ant-select-selector {
+  padding-inline-start: 8px !important;
+}
+.qb-operator-btn {
+  width: 34px;
+  height: 30px;
+  border-radius: 8px;
+  border: 1px solid var(--studio-border, #e2dcd4);
+  background: var(--studio-panel, #f5f1e9);
+  color: var(--studio-accent, #c15f3c);
+  font-weight: 700;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.qb-operator-btn:hover {
+  border-color: var(--studio-accent, #c15f3c);
+  background: color-mix(in srgb, var(--studio-accent, #c15f3c) 10%, transparent);
+}
+.qb-filter-value {
+  flex: 1;
+  min-width: 110px;
+}
+.qb-filter-value-empty {
+  flex: 1;
+  min-width: 110px;
+  padding: 4px 11px;
+  color: var(--studio-subtle, #91877e);
+  font-size: 13px;
+  font-style: italic;
 }
 

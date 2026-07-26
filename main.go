@@ -176,7 +176,7 @@ func main() {
 	patchHandler.RegisterRoutes(mux)
 	commandHandler := handlers.NewCommandHandler(database, indexCoordinator)
 	commandHandler.RegisterRoutes(mux)
-	databaseHandler := handlers.NewDatabaseHandler(database)
+	databaseHandler := handlers.NewDatabaseHandler(database, cfg.OllamaURL, cfg.DefaultModel)
 	databaseHandler.RegisterRoutes(mux)
 
 	// Serve static frontend files (from the React build). The frontend is a
