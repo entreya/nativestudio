@@ -159,7 +159,7 @@ export default function DatabasePage() {
             <div className="db-animate-in" style={{ marginBottom: 32, display: 'flex', gap: 20 }}>
               <div className="db-metric-card">
                 <span className="db-metric-title">Total Tables</span>
-                <span className="db-metric-value">{tables.length}</span>
+                <span className="db-metric-value">{(tables || []).length}</span>
               </div>
               <div className="db-metric-card" style={{ animationDelay: '0.1s' }}>
                 {/* Previously showed the fetched page size and called it the

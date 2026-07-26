@@ -1,35 +1,41 @@
 # 🧠 nativestudio
 
-> Continue.dev gives you AI in VS Code. This gives you control over what the AI actually remembers.
+> Local models are small on purpose — the reliability has to come from the harness around them, not from pretending they're bigger than they are.
 
-**nativestudio** is a local-first AI code editor — Monaco editor + Ollama backend with a persistent knowledge base of your codebase, an agentic tool-calling loop, checkpoint-based context summarization, and diff/patch-based code review. **No cloud. No subscriptions. No data leaves your machine.**
+**nativestudio** is a local-first AI code editor — Monaco editor + Ollama backend with a persistent knowledge base of your codebase, an agentic tool-calling loop, verified/fact-checked memory, a real terminal, and diff/patch-based code review. **No cloud. No subscriptions. No data leaves your machine.**
 
 ---
 
 ## Why This Exists
 
-Most local AI editor tools (Continue.dev, VSCode Ollama) are great for quick suggestions but treat every conversation independently. They don't manage the growing context of a long coding session — when you're refactoring a complex module, fixing interconnected bugs, or building a feature over hours, the AI loses track of what it already decided.
+A 4B-parameter local model on a laptop is never going to out-think a frontier model — it doesn't have the capacity, and no amount of prompting closes that gap. What it *can* do is stop making the same class of mistake twice, if the mistakes it's prone to are handled structurally instead of left to its judgment:
 
-**nativestudio** solves this with:
+- Ask it to rename a class by hand-editing text, and it will burn most of its reasoning re-deriving an exact string match, then still forget to rename the file — breaking PSR-4/module resolution. Give it a `rename_symbol` tool that takes a name instead of a string, and that entire failure mode disappears.
+- Ask it a question with a stale or unverified answer already in its context, and it will confidently repeat it. Gate what gets remembered behind cross-source agreement or explicit user confirmation, and it can't.
+- Ask it something and disconnect before it answers (switch tabs, close a panel), and a naive implementation just discards the in-flight response. Detach the run from the request lifecycle, and it doesn't.
+- Leave it with an ambiguous tool error ("not found") for a state it can't interpret, and it will spend several rounds re-guessing what happened. Give the tool enough context to say what's actually true, and it reports the answer in one line instead.
 
-- A **tree-sitter-backed knowledge base** — every project is indexed into SQLite (symbols, chunks, embeddings, file/module/project summaries) and kept current by a file watcher, so the AI can retrieve relevant code instead of relying only on what's in the current chat.
-- A **checkpoint system** for the conversation itself — tracks full history with token counts, summarizes old context into checkpoints before hitting the model's limit, and keeps recent messages verbatim.
-- An **agent loop with tools** — the model can read files, search text, inspect editor state, and search the internet for current information, instead of only replying from a single prompt.
+None of this makes the model smarter. It shrinks the set of situations where the model's own judgment is the thing standing between you and a correct result. That's the actual bet this project makes, and most of what's below follows from it.
 
 ---
 
 ## Features
 
-- 🖥️ **Split-view interface** — Monaco editor (left) + AI chat (right), built with React
-- 🧠 **Context-aware sessions** — persisted history + retrieved knowledge sent to Ollama on every request
-- 📚 **Project knowledge base** — tree-sitter indexing of symbols/chunks, semantic search via embeddings, project/module/file summaries, and a facts/decisions memory that survives across sessions
-- 📍 **Checkpoint summarization** — AI compresses old context at 60–80% token usage
+- 🖥️ **Split-view interface** — Monaco editor (left) + AI chat (right) + a real PTY-backed terminal panel, all in one window
+- 🧠 **Context-aware sessions** — persisted history + retrieved knowledge sent to Ollama on every request, with checkpoint summarization before the context window fills
+- 📚 **Project knowledge base** — tree-sitter indexing of symbols/chunks, semantic search via embeddings, project/module/file summaries kept current by a file watcher
+- ✅ **Verified memory, not just history** — facts only get recalled as settled once they've passed cross-source agreement (independent publisher domains, not raw result count) or explicit user confirmation; a separate table from ordinary session history so an unverified guess can never be replayed as fact
+- 🌐 **Multi-engine fact-checked search** — queries Bing, Google News, Wikipedia, and DuckDuckGo in parallel, unwraps aggregator links to their real publisher, and marks derivative sources (e.g. DuckDuckGo's abstract, largely Wikipedia text) so they can't falsely corroborate each other
+- 🪜 **Confidence escalation ladder** — high confidence → answer and cite it; medium → answer with the corroboration caveat stated; low → say so and offer to search again or ask you, instead of asserting a weak claim as settled
+- 🛠️ **Deterministic refactor tools** — `rename_symbol` renames a class/function/constant's declaration, every reference, and its file together in one atomic, reviewable operation — no hand-written find/replace, no PSR-4 mismatches
+- 💻 **Real integrated terminal** — a persistent PTY per project (cd survives, long processes outlive the panel closing, scrollback replays on reconnect) alongside `run_terminal` for the agent's own quick, reversible commands
+- 📍 **Checkpoint summarization** — AI compresses old context at 60–80% token usage without losing recent messages
 - 📊 **Token bar** — live visual of context usage with Green / Yellow / Red zones
-- 🔀 **Diff & patch review** — AI-proposed edits are shown as diffs and staged as patches; accept, reject, or roll back
-- 🛠️ **Agent tools** — file read/list/search, editor-state awareness, and internet search, all invoked by the model as native tool calls
-- 📁 **File system access** — open and save files within a chosen project directory
-- 🔌 **Model selector** — dropdown to switch between Ollama models mid-session, with optional "thinking" mode for models that support it
-- 📡 **Streaming responses** — real-time output via SSE, no waiting for full reply
+- 🔀 **Diff & patch review** — every proposed edit (including multi-file operations like a rename) is shown as a diff and staged as a patch; accept, reject, or roll back
+- 🗄️ **Database explorer** — browse the app's own SQLite state (sessions, knowledge, patches) with real pagination, not a silently-truncated first page
+- 🎨 **Platform-matched themes** — macOS, Windows 11, Windows 12, and Liquid Glass, plus a Windows-11-style snap layout picker
+- ⚙️ **Tunable agent behavior** — Settings exposes max thinking-token budget, response temperature ("creativity"), and periodic model unload, all read live with no restart
+- 📡 **Streaming responses** — real-time output via SSE, with the full reasoning timeline (tool calls, search results, rephrasing) persisted and replayed on reload
 - 🔒 **100% offline, loopback-only by default** — no API keys, no telemetry; the server binds to `127.0.0.1` unless explicitly reconfigured
 
 ---
@@ -37,10 +43,10 @@ Most local AI editor tools (Continue.dev, VSCode Ollama) are great for quick sug
 ## Architecture
 
 ```
-Browser (React + Monaco)
-    ↕ REST + SSE
-Go HTTP Server  ←→  File System
-    │  ↕ SQLite (sessions, messages, knowledge, patches)
+Browser (React + Monaco + xterm.js)
+    ↕ REST + SSE + WebSocket
+Go HTTP Server  ←→  File System  ←→  PTY (terminal sessions)
+    │  ↕ SQLite (sessions, messages, knowledge, patches, verified facts)
     │  ↕ tree-sitter indexer + fsnotify watcher
     ↕
 Ollama (localhost:11434)
@@ -48,13 +54,31 @@ Ollama (localhost:11434)
 
 | Layer | Technology | Role |
 |---|---|---|
-| Frontend | React (Vite) + Monaco Editor + Ant Design | Editor, chat UI, diff/patch review |
-| Backend | Go (net/http) | File I/O, sessions, agent loop, Ollama proxy |
-| Persistence | SQLite (modernc.org/sqlite) | Sessions, messages, knowledge base, patches |
+| Frontend | React (Vite) + Monaco Editor + xterm.js + Ant Design | Editor, chat UI, terminal, diff/patch review |
+| Backend | Go (net/http) | File I/O, sessions, agent loop, Ollama proxy, PTY management |
+| Persistence | SQLite (modernc.org/sqlite) | Sessions, messages, knowledge base, patches, verified facts |
 | Indexing | tree-sitter + fsnotify | Symbol/chunk extraction, incremental re-indexing |
 | AI Runtime | Ollama | Local model inference, embeddings |
 
-**The Go server owns all state** — sessions, messages, checkpoints, and the project knowledge base are persisted in SQLite (`data/nativestudio.db`), not just held in memory.
+**The Go server owns all state** — sessions, messages, checkpoints, verified facts, and the project knowledge base are persisted in SQLite (`data/nativestudio.db`), not just held in memory.
+
+---
+
+## Agent Tools
+
+The model never edits files or runs commands by generating raw text a person then has to trust — every mutating action goes through a specific tool, gets staged as a reviewable patch, and is only applied once approved:
+
+| Tool | What it does |
+|---|---|
+| `find_files`, `list_directory` | Locate files by name/pattern before assuming a path |
+| `search_text` | Grep-style search across the workspace |
+| `search_internet` | Multi-engine, cross-source, confidence-scored web search |
+| `read_file`, `read_file_range` | Read exact file content instead of guessing at it |
+| `get_editor_context` | The active file, cursor, selection — what you're actually looking at |
+| `create_file`, `delete_file`, `replace_in_file`, `apply_patch` | Staged, reviewable single-file mutations |
+| `rename_symbol` | Deterministic rename: declaration + every reference + the file itself, together |
+| `run_command`, `run_terminal` | Shell execution — instant for reversible commands, staged for approval otherwise |
+| `ask_follow_up` | A real clarifying question when the request is genuinely ambiguous — not a fallback for "I didn't feel like acting" |
 
 ---
 
@@ -77,9 +101,11 @@ Ollama (localhost:11434)
 5. Recent messages are kept verbatim
 6. Multiple checkpoints can stack — oldest compressed first
 
-### Project Knowledge
+### Project Knowledge & Verified Memory
 
-Alongside conversation context, each project gets its own persistent knowledge base: indexed symbols and code chunks, optional embeddings for semantic search, generated file/module/project summaries, and a running list of facts, accepted/rejected decisions, and session learnings. This is what the agent's context resolver draws on before answering — see `/api/projects/{id}/knowledge` for the full picture.
+Each project gets its own persistent knowledge base: indexed symbols and code chunks, optional embeddings for semantic search, generated file/module/project summaries, and a running list of facts, accepted/rejected decisions, and session learnings — see `/api/projects/{id}/knowledge` for the full picture.
+
+Two things are kept structurally separate from that ordinary history: **verified facts** (only written after cross-source search agreement or your explicit confirmation, so recalling one is safe) and **approved changes** (procedural memory drawn only from patches you actually accepted — never from the model's own unverified claim that something worked).
 
 ---
 
@@ -91,16 +117,15 @@ Alongside conversation context, each project gets its own persistent knowledge b
 - At least one model pulled in Ollama
 
 ```bash
-# Pull a coding model (recommended)
-ollama pull qwen2.5-coder:1.5b
-# or
-ollama pull deepseek-coder
-# or
-ollama pull qwen2.5-coder
+# A small, capable coding model — Qwen3 4B is what nativestudio ships a
+# custom Modelfile for by default (see below); any Ollama chat model works
+ollama pull qwen3:4b
 
-# Pull an embedding model for semantic knowledge search
+# An embedding model for semantic knowledge search
 ollama pull nomic-embed-text
 ```
+
+**Choosing a model:** for a coding agent, reliable *tool-calling* matters more than raw benchmark score — a model that narrates a code change instead of calling a tool is worse than a smaller one that reliably calls the right tool every time. Dense models have consistently outperformed Mixture-of-Experts models of similar or larger size on multi-step tool-calling in independent 2026 evaluations; start with a small dense model in the 4B–8B range rather than a flashier MoE model that needs far more RAM than its "active parameter count" suggests.
 
 ---
 
@@ -137,39 +162,43 @@ Edit `config.json` in the project root:
   "port": 8080,
   "ollama_url": "http://localhost:11434",
   "db_path": "./data/nativestudio.db",
-  "default_model": "qwen2.5-coder:1.5b",
-  "chat_model": "qwen2.5-coder:1.5b",
-  "summary_model": "qwen2.5-coder:1.5b",
+  "default_model": "qwen3:4b",
+  "chat_model": "qwen3:4b",
+  "summary_model": "qwen3:4b",
   "embedding_model": "nomic-embed-text",
   "index_batch_size": 10,
   "maximum_file_size_bytes": 1048576,
   "ollama_concurrency": 2,
+  "embedding_concurrency": 4,
+  "max_agent_tool_steps": 15,
   "context": {
-    "yellow_threshold": 0.60,
-    "red_threshold": 0.80,
+    "yellow_threshold": 0.6,
+    "red_threshold": 0.8,
     "keep_recent_messages": 10,
-    "summarize_using_model": "qwen2.5-coder:1.5b"
+    "summarize_using_model": "qwen3:4b"
   },
   "filesystem": {
     "root_dir": "./workspace",
-    "allowed_extensions": [".php", ".go", ".js", ".ts", ".py", ".md", ".json", ".yaml"]
+    "allowed_extensions": ["...see config.json for the full list..."]
   }
 }
 ```
 
-| Key | Default | Description |
-|---|---|---|
-| `host` | `127.0.0.1` | Listen address. Only change this if you understand that it exposes filesystem and tool-calling access to your network. |
-| `db_path` | `./data/nativestudio.db` | SQLite database for sessions, messages, and the knowledge base |
-| `summary_model` / `embedding_model` | same as chat model / `nomic-embed-text` | Models used for checkpoint summaries and semantic search |
-| `index_batch_size` | 10 | Files enriched (summarized/embedded) per batch after indexing |
-| `maximum_file_size_bytes` | 1048576 | Files larger than this are skipped by the indexer |
-| `ollama_concurrency` | 2 | Max concurrent requests to Ollama for indexing work |
-| `yellow_threshold` | 0.60 | Token % where summarization triggers |
-| `red_threshold` | 0.80 | Token % where requests are blocked |
-| `keep_recent_messages` | 10 | Messages kept verbatim before checkpoint |
+| Key | Description |
+|---|---|
+| `host` | Listen address. Only change this if you understand that it exposes filesystem and tool-calling access to your network. |
+| `db_path` | SQLite database for sessions, messages, knowledge base, and verified facts |
+| `summary_model` / `embedding_model` | Models used for checkpoint summaries and semantic search |
+| `max_agent_tool_steps` | Hard ceiling on tool-call steps per agent run, independent of the thinking-token budget |
+| `index_batch_size` | Files enriched (summarized/embedded) per batch after indexing |
+| `maximum_file_size_bytes` | Files larger than this are skipped by the indexer |
+| `ollama_concurrency` / `embedding_concurrency` | Max concurrent requests to Ollama for indexing/enrichment work |
+| `yellow_threshold` / `red_threshold` | Token % where summarization triggers / requests are blocked |
+| `keep_recent_messages` | Messages kept verbatim before checkpoint |
 
-**Security note:** the server is designed to run on your own machine only. It grants the model tool-calling access to read/write files under the active project, so avoid setting `host` to anything other than a loopback address unless you understand the risk.
+Beyond `config.json`, the in-app **Settings** page lets you tune agent behavior live, no restart required: max thinking-token budget, response temperature ("Response Creativity"), and how often the model is force-unloaded from memory under sustained use.
+
+**Security note:** the server is designed to run on your own machine only. It grants the model tool-calling access to read/write files under the active project and to run shell commands, so avoid setting `host` to anything other than a loopback address unless you understand the risk.
 
 ---
 
@@ -179,10 +208,10 @@ Edit `config.json` in the project root:
 
 1. Open a folder to create or select a project
 2. Open a file from the file tree (left panel) and write or paste code in Monaco
-3. Type a prompt in the AI chat (right panel) — e.g., *"Refactor this function to handle errors explicitly"*
-4. The agent may read files, search the codebase, or search the internet before responding — you can see each tool call in the timeline
+3. Type a prompt in the AI chat (right panel) — e.g., *"Rename UserController to AccountController"*
+4. The agent may read files, search the codebase, or search the internet before responding — every tool call is visible in the reasoning timeline
 5. Response streams in; proposed file edits appear as a **diff** — review and **Accept** or **Reject**
-6. Accepted changes are applied to disk and staged as patches (see Project Knowledge → Patches) for later rollback if needed
+6. Accepted changes are applied to disk and staged as patches (see Database Explorer → patches) for later rollback if needed
 
 ### Keyboard Shortcuts
 
@@ -196,6 +225,7 @@ Edit `config.json` in the project root:
 - **Send full file** — checkbox in chat panel, included automatically for the active file
 - **Editor state** — cursor position, selection, and the symbol under the cursor are sent with every request
 - **Knowledge retrieval** — relevant symbols, chunks, and summaries from the project's indexed knowledge base are added automatically based on the prompt
+- **Verified facts & approved changes** — recalled automatically when the current prompt matches something already settled, so the model doesn't re-research or re-derive it from scratch
 
 ---
 
@@ -203,26 +233,52 @@ Edit `config.json` in the project root:
 
 The Go server exposes these endpoints (useful for scripting or custom clients):
 
+**Projects & Files**
 | Method | Endpoint | Description |
 |---|---|---|
-| `GET` | `/api/projects` | List projects |
-| `POST` | `/api/projects` | Create a project |
-| `POST` | `/api/workspace` | Switch the active workspace root (loopback only) |
+| `GET`/`POST` | `/api/projects` | List / create projects |
+| `GET`/`DELETE` | `/api/projects/{id}` | Get / delete a project |
 | `GET` | `/api/files` | List directory tree |
-| `GET` | `/api/file?path=` | Read file content |
-| `POST` | `/api/file` | Save file content |
-| `GET` | `/api/models` | List available Ollama models |
+| `GET`/`POST` | `/api/file` | Read / save file content |
+| `POST` | `/api/files/create` \| `/rename` \| `/delete` | File operations from the explorer UI |
+| `GET` | `/api/system/browse` | Native folder picker (Open Folder) |
+
+**Chat & Sessions**
+| Method | Endpoint | Description |
+|---|---|---|
 | `POST` | `/api/chat` | Send prompt, stream response via SSE |
-| `GET` | `/api/context` | Get current session context + token count |
+| `GET`/`POST` | `/api/projects/{id}/sessions` | List / create sessions |
+| `GET`/`DELETE` | `/api/sessions/{id}` | Session messages / delete |
+| `GET` | `/api/context` | Current session context + token count |
 | `POST` | `/api/context/reset` | Clear session context |
-| `GET` | `/api/projects/{id}/sessions` | List sessions for a project |
-| `GET` | `/api/sessions/{id}/messages` | Get a session's message history |
-| `GET` | `/api/projects/{id}/knowledge` | Knowledge base overview (symbols, facts, decisions, summaries) |
+| `GET` | `/api/models` | List available Ollama models |
+| `POST` | `/api/models/unload` | Free a model from memory immediately |
+
+**Knowledge & Memory**
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/projects/{id}/knowledge` | Symbols, facts, decisions, summaries |
 | `POST` | `/api/projects/{id}/index` | Trigger a re-index |
-| `GET` | `/api/projects/{id}/index/events` | SSE stream of indexing progress |
-| `POST` | `/api/changes/{id}/approve` \| `/reject` | Approve or reject a proposed file change |
+| `GET` | `/api/projects/{id}/index/status` \| `/events` | Index progress (poll or SSE) |
+| `POST` | `/api/projects/{id}/index/stop` | Cancel an in-progress index |
+| `POST` | `/api/projects/{id}/knowledge/enrichment/approve` \| `/decline` \| `/pause` \| `/resume` | Enrichment gate controls |
+| `PATCH`/`DELETE` | `/api/projects/{id}/knowledge/facts/{factID}` | Edit / remove a stored fact |
+
+**Patches & Commands**
+| Method | Endpoint | Description |
+|---|---|---|
 | `GET` | `/api/sessions/{sessionId}/patches` | List staged patches |
+| `POST` | `/api/sessions/{sessionId}/patches/approve` \| `/reject` | Resolve a staged patch |
 | `POST` | `/api/patches/{patchId}/rollback` | Roll back an applied patch |
+| `GET` | `/api/sessions/{sessionId}/commands` | List staged commands |
+| `POST` | `/api/sessions/{sessionId}/commands/approve` \| `/reject` | Resolve a staged command |
+
+**Terminal, Database & Settings**
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/projects/{id}/terminal/ws` | WebSocket for the real PTY terminal panel |
+| `GET` | `/api/projects/{id}/db/tables` \| `/tables/{table}/data` | Browse the app's own SQLite state |
+| `GET`/`PUT` | `/api/settings` | Read / update agent + editor settings |
 
 ---
 
@@ -232,17 +288,18 @@ The Go server exposes these endpoints (useful for scripting or custom clients):
 nativestudio/
 ├── main.go
 ├── config.json
-├── agent/           # Tool-calling agent loop, tool registry, filesystem/search/internet tools
+├── agent/           # Tool-calling agent loop, tool registry, rename/rephrase/search/verified-memory logic
 ├── context/         # Session store, checkpoint summarizer, token estimation, context budgeting
-├── db/              # SQLite access layer: sessions, messages, knowledge base, patches, migrations
+├── db/              # SQLite access layer: sessions, messages, knowledge base, patches, verified facts, migrations
 ├── editor/          # Editor-state persistence (cursor, selection, open/recent files)
-├── handlers/        # HTTP handlers: files, chat, models, projects, sessions, knowledge, changes, patches
+├── handlers/        # HTTP handlers: files, chat, models, projects, sessions, knowledge, patches, terminal, settings, database
 ├── indexer/         # Tree-sitter parsing, file scanning/watching, incremental indexing pipeline
 ├── knowledge/       # Shared knowledge-base types and interfaces
 ├── ollama/          # Ollama client for embeddings and structured summarization
 ├── resolver/        # Resolves which file/symbol a prompt refers to, retrieves knowledge candidates
+├── terminal/        # PTY session management for the integrated terminal panel
 ├── workspace/       # Path-traversal guard shared by every filesystem-touching component
-├── frontend/        # React + Vite app (Monaco editor, chat panel, knowledge/conversations pages)
+├── frontend/        # React + Vite app (Monaco editor, chat panel, terminal, knowledge/database/settings pages)
 └── go.mod
 ```
 
@@ -266,7 +323,7 @@ git push origin feature/your-feature-name
 
 ## License
 
-MIT — do whatever you want, just keep the attribution.
+[MIT](LICENSE) — do whatever you want, just keep the attribution.
 
 ---
 

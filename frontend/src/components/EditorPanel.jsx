@@ -36,7 +36,18 @@ export default function EditorPanel({
   const [content, setContent] = useState('');
   const [unsaved, setUnsaved] = useState(false);
   const [loadError, setLoadError] = useState('');
-  const [isLoading, setIsLoading] = useState(false);
+  // isLoading is derived by comparing filepath against which file the
+  // currently-loaded content belongs to, rather than a separate flag set
+  // directly at the top of the fetch effect below — that would mean calling
+  // setState synchronously in an effect body, a pattern that can trigger an
+  // extra cascading render. loadedFilepath only changes once a fetch
+  // actually settles (inside .then/.catch), never synchronously in the
+  // effect itself. Trade-off: closing a file and reopening the exact same
+  // path won't flash the loading skeleton (loadedFilepath already matches),
+  // though the refetch still happens and content still updates correctly —
+  // a purely cosmetic gap in a rare case, not a correctness one.
+  const [loadedFilepath, setLoadedFilepath] = useState('');
+  const isLoading = Boolean(filepath) && loadedFilepath !== filepath;
   const editorRef = useRef(null);
   const { token } = useToken();
   // Track the previous word to avoid firing onSymbolChange for unchanged words.
@@ -75,9 +86,6 @@ export default function EditorPanel({
   useEffect(() => {
     if (filepath) {
       let cancelled = false;
-      setIsLoading(true);
-      setContent('');
-      setLoadError('');
 
       fetch(`/api/file?path=${encodeURIComponent(filepath)}`)
         .then(async res => {
@@ -90,6 +98,7 @@ export default function EditorPanel({
           setContent(hasPreview ? aiPreview.suggested : (data.content ?? ''));
           setUnsaved(hasPreview);
           setLoadError('');
+          setLoadedFilepath(filepath);
           lastWordRef.current = '';
         })
         .catch(err => {
@@ -97,9 +106,7 @@ export default function EditorPanel({
           console.error(err);
           setLoadError(err.message || 'Could not load this file.');
           setContent('');
-        })
-        .finally(() => {
-          if (!cancelled) setIsLoading(false);
+          setLoadedFilepath(filepath);
         });
       return () => { cancelled = true; };
     }

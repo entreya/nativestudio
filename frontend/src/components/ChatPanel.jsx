@@ -251,7 +251,10 @@ export default function ChatPanel({
   const [currentModel, setCurrentModel] = useState('');
   const [isThinkingModel, setIsThinkingModel] = useState(false);
   const [thinkMode, setThinkMode] = useState(false);
-  const [thinkLevel, setThinkLevel] = useState('medium');
+  // No UI control sets this yet — always sent as 'medium'. Kept as state
+  // rather than a plain constant so a future thinking-level picker only
+  // needs to add the setter call, not restructure this.
+  const [thinkLevel] = useState('medium');
 
   const [sessions, setSessions] = useState([]);
   const [loadedProjectId, setLoadedProjectId] = useState('');

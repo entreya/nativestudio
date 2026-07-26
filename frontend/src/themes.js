@@ -1,5 +1,4 @@
 const uiFont = 'Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
-const monoFont = '"SFMono-Regular", "Cascadia Code", Menlo, Consolas, monospace';
 const sfFont = '-apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Helvetica Neue", sans-serif';
 const segoeFont = '"Segoe UI Variable", "Segoe UI", "Segoe UI Historic", -apple-system, sans-serif';
 

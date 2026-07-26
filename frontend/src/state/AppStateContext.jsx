@@ -6,7 +6,7 @@ import { getStudioTheme, themeVariables } from '../themes';
 import { fileURL } from './fileURL';
 import { folderNameFromPath } from './folderNameFromPath';
 import { AppStateContext } from './context';
-import { loadFontSettings, saveFontSettings, DEFAULT_FONT_SETTINGS } from './fontSettings';
+import { DEFAULT_FONT_SETTINGS } from './fontSettings';
 
 // --- Editor Settings ---
 const DEFAULT_EDITOR_SETTINGS = {

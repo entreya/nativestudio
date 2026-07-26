@@ -38,7 +38,7 @@ export default function StatusBar({
       <Space size="middle">
         <span className="status-item"><BranchesOutlined /> main</span>
         <span className="status-item"><CloseOutlined style={{ fontSize: 10 }} /> 0</span>
-        {indexStatus.status === 'completed_with_errors' && (
+        {indexStatus?.status === 'completed_with_errors' && (
           <Tooltip title={`${indexStatus.errors || 0} indexing errors`}>
             <span className="status-item status-warning"><DatabaseOutlined /> Indexed with warnings</span>
           </Tooltip>

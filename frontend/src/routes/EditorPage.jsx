@@ -1,9 +1,9 @@
 import React from 'react';
-import { Typography, Button, Tabs, Tooltip, Avatar, Breadcrumb, Space, Dropdown } from 'antd';
+import { Typography, Button, Tabs, Tooltip, Avatar, Breadcrumb, Space } from 'antd';
 import {
   FolderOpenOutlined, FileOutlined, SettingOutlined, SearchOutlined,
   AppstoreOutlined, UserOutlined, BranchesOutlined, PlusOutlined,
-  EllipsisOutlined, CodeOutlined, DatabaseOutlined, BgColorsOutlined, FontSizeOutlined,
+  EllipsisOutlined, CodeOutlined, DatabaseOutlined,
 } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import FileTree from '../components/FileTree';
@@ -22,11 +22,6 @@ import { useProjectRouteSync, useFileRouteSync } from '../hooks/useRouteSync';
 
 const { Text } = Typography;
 
-const settingsMenuItems = [
-  { key: 'theme', icon: <BgColorsOutlined />, label: 'Theme' },
-  { key: 'fonts', icon: <FontSizeOutlined />, label: 'Fonts' },
-];
-
 export default function EditorPage() {
   const navigate = useNavigate();
   const projectId = useProjectRouteSync();
@@ -34,8 +29,7 @@ export default function EditorPage() {
 
   const {
     studioStyle, studioClassName, activeTheme,
-    themeSettingsOpen, setThemeSettingsOpen, themeID, selectTheme,
-    fontSettingsOpen, setFontSettingsOpen, fontSettings, updateFontSettings,
+    fontSettings,
     editorSettings,
     activeProject, handleNavigate, handleOpenFile, handleCreateProject,
     layout, toggleLayout,
@@ -103,21 +97,7 @@ export default function EditorPage() {
 
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 24, width: '100%', paddingBottom: 8 }}>
             <Tooltip placement="right" title="Settings">
-              <Dropdown
-                trigger={['click']}
-                placement="rightBottom"
-                menu={{
-                  items: settingsMenuItems,
-                  onClick: ({ key }) => {
-                    if (key === 'theme') setThemeSettingsOpen(true);
-                    else if (key === 'fonts') setFontSettingsOpen(true);
-                  },
-                }}
-              >
-                <span style={{ display: 'inline-flex', cursor: 'pointer' }}>
-                  <SettingOutlined style={{ fontSize: 24, color: 'var(--studio-subtle, #91877e)' }} />
-                </span>
-              </Dropdown>
+              <SettingOutlined onClick={() => handleNavigate('settings')} style={{ fontSize: 24, color: 'var(--studio-subtle, #91877e)', cursor: 'pointer' }} />
             </Tooltip>
             <Avatar icon={<UserOutlined />} size={24} style={{ backgroundColor: 'var(--studio-border, #d8d1c5)', color: 'var(--studio-text, #2f2a26)', cursor: 'pointer' }} />
           </div>
