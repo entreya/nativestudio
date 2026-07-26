@@ -72,3 +72,34 @@ func TestNextChatKeepAliveDisabledByZeroThreshold(t *testing.T) {
 		}
 	}
 }
+
+func TestCurrentResponseTemperatureFallsBackWhenUnset(t *testing.T) {
+	withSettingsFile(t, "")
+	if got := currentResponseTemperature(); got != defaultResponseTemperature {
+		t.Fatalf("expected default %v, got %v", defaultResponseTemperature, got)
+	}
+}
+
+func TestCurrentResponseTemperatureReadsOverride(t *testing.T) {
+	withSettingsFile(t, `{"agentSettings":{"temperature":0.3}}`)
+	if got := currentResponseTemperature(); got != 0.3 {
+		t.Fatalf("expected 0.3, got %v", got)
+	}
+}
+
+// An explicit 0 (fully deterministic output) is a legitimate, meaningful
+// choice distinct from the setting never having been touched — it must not
+// be treated the same as "unset" and silently replaced with the default.
+func TestCurrentResponseTemperatureExplicitZeroIsNotFallback(t *testing.T) {
+	withSettingsFile(t, `{"agentSettings":{"temperature":0}}`)
+	if got := currentResponseTemperature(); got != 0 {
+		t.Fatalf("expected explicit 0 to be honored, got %v", got)
+	}
+}
+
+func TestCurrentResponseTemperatureRejectsOutOfRange(t *testing.T) {
+	withSettingsFile(t, `{"agentSettings":{"temperature":1.8}}`)
+	if got := currentResponseTemperature(); got != defaultResponseTemperature {
+		t.Fatalf("expected fallback to default for an out-of-range value, got %v", got)
+	}
+}

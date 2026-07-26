@@ -307,6 +307,30 @@ export default function SettingsTab() {
         <Col span={24}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <Text strong style={{ color: 'var(--studio-text)' }}>Response Creativity</Text>
+              <InputNumber
+                min={0} max={1} step={0.1}
+                value={agentSettings?.temperature ?? 0.7}
+                onChange={v => updateAgentSettings({ temperature: v })}
+                style={{ width: 110 }}
+              />
+            </div>
+            <Text style={{ color: 'var(--studio-muted)', fontSize: 12, marginBottom: 8 }}>
+              Controls how much the model varies its wording and choices between runs (this is what's usually called
+              "temperature"). Lower it toward Precise for consistent, repeatable answers on the same prompt; raise it
+              toward Creative for more varied phrasing and less predictable output.
+            </Text>
+            <Slider
+              min={0} max={1} step={0.1}
+              value={agentSettings?.temperature ?? 0.7}
+              onChange={v => updateAgentSettings({ temperature: v })}
+              marks={{ 0: 'Precise', 0.7: 'Default', 1: 'Creative' }}
+            />
+          </div>
+        </Col>
+        <Col span={24}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
               <Text strong style={{ color: 'var(--studio-text)' }}>Force-Unload Model Every N Chats</Text>
               <InputNumber
                 min={0} max={2000} step={10}

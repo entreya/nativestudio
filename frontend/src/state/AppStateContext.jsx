@@ -36,6 +36,11 @@ const DEFAULT_AGENT_SETTINGS = {
   // under continuous back-to-back use where a plain idle timeout would
   // never fire. 0 disables this and relies on keep_alive alone.
   forceUnloadAfterChats: 100,
+  // Mirrors agent/settings.go's defaultResponseTemperature. Ollama's
+  // sampling temperature: 0 always picks the most likely token, 1 is as far
+  // as this app's slider goes before output stops reading as coherent code
+  // or prose for most local models.
+  temperature: 0.7,
 };
 
 export function AppStateProvider({ children }) {

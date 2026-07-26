@@ -16,6 +16,20 @@ const (
 	maxMaxThinkingTokensCap = 20000
 )
 
+// Bounds for the Settings-page "Response Creativity" control, which maps
+// directly onto Ollama's sampling temperature. 0 always picks the
+// highest-probability token (deterministic, repeats itself on retries); 1 is
+// as far as the slider goes before output stops reading as coherent code or
+// prose for most local models. defaultResponseTemperature (0.7) matches what
+// this app used implicitly before the field existed — omitting "temperature"
+// from the request left each model's own Modelfile default in effect, which
+// is 0.7-0.8 for the models this app ships with.
+const (
+	minResponseTemperature     = 0.0
+	maxResponseTemperature     = 1.0
+	defaultResponseTemperature = 0.7
+)
+
 // settingsFilePath points at the same JSON file handlers.SettingsHandler
 // reads and writes (main.go wires this via SetSettingsPath at startup) —
 // this package only ever reads it, never writes it.
@@ -30,8 +44,13 @@ func SetSettingsPath(path string) {
 
 type storedSettings struct {
 	AgentSettings struct {
-		MaxThinkingTokens      int `json:"maxThinkingTokens"`
-		ForceUnloadAfterChats int `json:"forceUnloadAfterChats"`
+		MaxThinkingTokens     int      `json:"maxThinkingTokens"`
+		ForceUnloadAfterChats int      `json:"forceUnloadAfterChats"`
+		// Pointer, not float64: 0 is a legitimate, meaningfully different
+		// choice (fully deterministic output) from the field being absent
+		// from an older settings file, and a plain zero-value check can't
+		// tell those two cases apart.
+		Temperature *float64 `json:"temperature"`
 	} `json:"agentSettings"`
 }
 
@@ -105,6 +124,30 @@ func currentMaxThinkingTokens() int {
 	value := parsed.AgentSettings.MaxThinkingTokens
 	if value < minMaxThinkingTokens || value > maxMaxThinkingTokensCap {
 		return defaultMaxThinkingTokens
+	}
+	return value
+}
+
+// currentResponseTemperature reads the live Settings-page "Response
+// Creativity" value, falling back to defaultResponseTemperature when unset,
+// out of range, or the settings file can't be read. Read fresh on every
+// call, same as currentMaxThinkingTokens, so a change takes effect on the
+// very next request with no server restart.
+func currentResponseTemperature() float64 {
+	data, err := os.ReadFile(settingsFilePath)
+	if err != nil {
+		return defaultResponseTemperature
+	}
+	var parsed storedSettings
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return defaultResponseTemperature
+	}
+	if parsed.AgentSettings.Temperature == nil {
+		return defaultResponseTemperature
+	}
+	value := *parsed.AgentSettings.Temperature
+	if value < minResponseTemperature || value > maxResponseTemperature {
+		return defaultResponseTemperature
 	}
 	return value
 }

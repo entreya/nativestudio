@@ -153,6 +153,7 @@ func (run *AgentRun) Step(
 		"messages":   messages,
 		"stream":     true,
 		"keep_alive": nextChatKeepAlive(),
+		"options":    map[string]any{"temperature": currentResponseTemperature()},
 	}
 	if !run.Direct {
 		ollamaReq["tools"] = registry.OllamaDefinitions()
