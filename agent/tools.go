@@ -70,6 +70,8 @@ func NewRegistry(workspaceRoot string) *Registry {
 	registerFollowUpTool(r)
 	registerPatchTools(r)
 	registerCommandTool(r)
+	registerTerminalTool(r)
+	registerRenameSymbolTool(r)
 	return r
 }
 

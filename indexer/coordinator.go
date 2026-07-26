@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -50,6 +51,17 @@ type Coordinator struct {
 	// queued jobs asks again rather than silently resuming.
 	enrichmentWorkspaceID string
 	enrichmentApproved    bool
+	// enrichmentDeclined tracks an explicit "Not now" from the user, so the
+	// pending-confirmation card stays dismissed instead of reappearing on the
+	// next status poll (which would otherwise recompute "pending_confirmation"
+	// again since declining doesn't change enrichmentApproved). Reset in the
+	// same places as enrichmentApproved so reopening the project asks again.
+	enrichmentDeclined bool
+	// enrichmentPaused suspends the enrichment workers between files without
+	// tearing down the run: queued jobs stay queued and the in-flight file is
+	// allowed to finish, so resuming picks up exactly where it stopped. This is
+	// the difference from Cancel(), which kills the scan and watcher too.
+	enrichmentPaused bool
 }
 
 func (c *Coordinator) Start(workspaceID, root string) {
@@ -77,6 +89,8 @@ func (c *Coordinator) start(workspaceID, root string, force bool) {
 	c.activeRoot = root
 	c.enrichmentWorkspaceID = workspaceID
 	c.enrichmentApproved = false
+	c.enrichmentDeclined = false
+	c.enrichmentPaused = false
 	c.generation++
 	generation := c.generation
 	c.enrichmentJobs = jobs
@@ -125,6 +139,8 @@ func (c *Coordinator) Cancel() {
 	c.activeRoot = ""
 	c.enrichmentWorkspaceID = ""
 	c.enrichmentApproved = false
+	c.enrichmentDeclined = false
+	c.enrichmentPaused = false
 	c.mu.Unlock()
 }
 
@@ -139,6 +155,7 @@ func (c *Coordinator) ApproveEnrichment(workspaceID string) {
 		return
 	}
 	c.enrichmentApproved = true
+	c.enrichmentDeclined = false
 	jobs := c.enrichmentJobs
 	c.mu.Unlock()
 	if jobs != nil {
@@ -149,6 +166,20 @@ func (c *Coordinator) ApproveEnrichment(workspaceID string) {
 	}
 }
 
+// DeclineEnrichment records an explicit "Not now" for workspaceID. It doesn't
+// touch the queued jobs — they stay queued so a later ApproveEnrichment (or
+// reopening the project) can still process them — it only stops the status
+// endpoint from reporting "pending_confirmation" so the notification card
+// stays dismissed. A no-op if workspaceID isn't the currently active workspace.
+func (c *Coordinator) DeclineEnrichment(workspaceID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.enrichmentWorkspaceID != workspaceID {
+		return
+	}
+	c.enrichmentDeclined = true
+}
+
 // IsEnrichmentApproved reports whether enrichment has been approved for
 // workspaceID. Used by the status endpoint to report "pending_confirmation"
 // instead of "running" while queued jobs are waiting on user approval.
@@ -156,6 +187,51 @@ func (c *Coordinator) IsEnrichmentApproved(workspaceID string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.enrichmentWorkspaceID == workspaceID && c.enrichmentApproved
+}
+
+// IsEnrichmentDeclined reports whether the user has explicitly said "Not
+// now" for workspaceID since it last became the active workspace.
+func (c *Coordinator) IsEnrichmentDeclined(workspaceID string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.enrichmentWorkspaceID == workspaceID && c.enrichmentDeclined
+}
+
+// PauseEnrichment suspends the enrichment workers for workspaceID after the
+// files already in flight finish. Queued jobs are left untouched.
+func (c *Coordinator) PauseEnrichment(workspaceID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.enrichmentWorkspaceID != workspaceID {
+		return
+	}
+	c.enrichmentPaused = true
+}
+
+// ResumeEnrichment lifts a PauseEnrichment and wakes the supervisor so it
+// starts draining the queue again immediately rather than on the next poll.
+func (c *Coordinator) ResumeEnrichment(workspaceID string) {
+	c.mu.Lock()
+	if c.enrichmentWorkspaceID != workspaceID {
+		c.mu.Unlock()
+		return
+	}
+	c.enrichmentPaused = false
+	jobs := c.enrichmentJobs
+	c.mu.Unlock()
+	if jobs != nil {
+		select {
+		case jobs <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// IsEnrichmentPaused reports whether enrichment for workspaceID is paused.
+func (c *Coordinator) IsEnrichmentPaused(workspaceID string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.enrichmentWorkspaceID == workspaceID && c.enrichmentPaused
 }
 
 func (c *Coordinator) index(ctx context.Context, workspaceID, root string, scanner Scanner) {
@@ -182,93 +258,168 @@ func (c *Coordinator) index(ctx context.Context, workspaceID, root string, scann
 	}
 	c.Broker.Emit(workspaceID, "index_started", map[string]any{"workspace_id": workspaceID, "run_id": runID, "total": total})
 	c.progress(ctx, runID, workspaceID, 0, total, len(skipped), 0)
-	processed, errors, changed, reused := 0, 0, 0, 0
 	for _, item := range skipped {
 		_ = c.DB.SaveIndexSkip(ctx, runID, workspaceID, item.Path, item.Reason)
 		c.Broker.Emit(workspaceID, "file_skipped", map[string]any{"path": item.Path, "reason": item.Reason})
 	}
-	for _, metadata := range files {
-		select {
-		case <-ctx.Done():
-			_ = c.DB.UpdateIndexRun(context.Background(), runID, "cancelled", processed, len(skipped), errors, ctx.Err().Error())
-			c.Broker.Emit(workspaceID, "index_cancelled", map[string]any{"run_id": runID})
-			return
+
+	// Reading, parsing and chunking are CPU-bound and account for nearly all of
+	// a scan's wall time, so they run across a worker pool (the tree-sitter
+	// parser builds a fresh instance per call, so it is safe concurrently).
+	//
+	// Every database call stays on this single goroutine below. That is not
+	// incidental: driving concurrent writes into modernc.org/sqlite from the
+	// worker pool reliably crashed the process with SIGBUS inside its WAL page
+	// reader. The parallel win is in the parsing, not the persisting.
+	//
+	// Each file must also be accounted for exactly once (processed++ or a
+	// skipped entry) — otherwise "processed + skipped" never reaches total and
+	// the progress bar sticks short of 100% forever.
+	workers := runtime.NumCPU()
+	if workers > 8 {
+		workers = 8
+	}
+	if workers < 1 {
+		workers = 1
+	}
+
+	// parseResult is one file's CPU work, ready for the serial DB stage.
+	type parseResult struct {
+		metadata FileMetadata
+		file     *ScannedFile
+		parsed   *knowledge.ParsedFile
+		chunks   []knowledge.Chunk
+		skip     *SkippedFile
+		err      error
+		stage    string // populated with err: "read" | "parse" | "chunk"
+		reuse    bool   // metadata/hash match — no re-parse needed
+	}
+
+	work := make(chan FileMetadata)
+	results := make(chan parseResult, workers*2)
+	var wg sync.WaitGroup
+
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for metadata := range work {
+				if ctx.Err() != nil {
+					return
+				}
+				previous, exists := manifest[metadata.Path]
+				if exists && previous.ModifiedAtNS != 0 && previous.SizeBytes == metadata.Size && previous.ModifiedAtNS == metadata.ModifiedAtNS {
+					results <- parseResult{metadata: metadata, reuse: true}
+					continue
+				}
+				file, readSkip, readErr := scanner.ReadDiscoveredFile(ctx, root, metadata)
+				if readErr != nil {
+					results <- parseResult{metadata: metadata, err: readErr, stage: "read"}
+					continue
+				}
+				if readSkip != nil {
+					results <- parseResult{metadata: metadata, skip: readSkip}
+					continue
+				}
+				if exists && previous.ContentHash == file.Hash {
+					results <- parseResult{metadata: metadata, file: file, reuse: true}
+					continue
+				}
+				parsed, parseErr := c.Parser.Parse(ctx, file.Path, file.Content)
+				if parseErr != nil {
+					results <- parseResult{metadata: metadata, file: file, err: parseErr, stage: "parse"}
+					continue
+				}
+				chunks, chunkErr := c.Chunker.Chunk(parsed)
+				if chunkErr != nil {
+					results <- parseResult{metadata: metadata, file: file, err: chunkErr, stage: "chunk"}
+					continue
+				}
+				results <- parseResult{metadata: metadata, file: file, parsed: parsed, chunks: chunks}
+			}
+		}()
+	}
+
+	go func() {
+		defer close(work)
+		for _, metadata := range files {
+			select {
+			case <-ctx.Done():
+				return
+			case work <- metadata:
+			}
+		}
+	}()
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	processed, errors, changed, reused := 0, 0, 0, 0
+	for result := range results {
+		if ctx.Err() != nil {
+			break
+		}
+		c.Broker.Emit(workspaceID, "file_discovered", map[string]any{"path": result.metadata.Path})
+
+		switch {
+		case result.err != nil:
+			c.recordError(ctx, runID, workspaceID, result.metadata.Path, result.stage, result.err)
+			processed++
+			errors++
+
+		case result.skip != nil:
+			skipped = append(skipped, *result.skip)
+			_ = c.DB.SaveIndexSkip(ctx, runID, workspaceID, result.skip.Path, result.skip.Reason)
+			c.Broker.Emit(workspaceID, "file_skipped", map[string]any{"path": result.skip.Path, "reason": result.skip.Reason})
+
+		case result.reuse:
+			previous := manifest[result.metadata.Path]
+			path, gitStatus, size, modified := result.metadata.Path, result.metadata.GitStatus, result.metadata.Size, result.metadata.ModifiedAtNS
+			if result.file != nil {
+				path, gitStatus, size, modified = result.file.Path, result.file.GitStatus, result.file.Size, result.file.ModifiedAtNS
+			}
+			if result.file != nil || previous.GitStatus != gitStatus {
+				if metadataErr := c.DB.UpdateRepositoryFileMetadata(ctx, workspaceID, path, gitStatus, size, modified); metadataErr != nil {
+					errors++
+					c.recordError(ctx, runID, workspaceID, path, "metadata", metadataErr)
+				}
+			}
+			processed++
+			reused++
+
 		default:
-		}
-		c.Broker.Emit(workspaceID, "file_discovered", map[string]any{"path": metadata.Path})
-		previous, exists := manifest[metadata.Path]
-		if exists && previous.ModifiedAtNS != 0 && previous.SizeBytes == metadata.Size && previous.ModifiedAtNS == metadata.ModifiedAtNS {
-			if previous.GitStatus != metadata.GitStatus {
-				_ = c.DB.UpdateRepositoryFileMetadata(ctx, workspaceID, metadata.Path, metadata.GitStatus, metadata.Size, metadata.ModifiedAtNS)
-			}
-			processed++
-			reused++
-			c.progress(ctx, runID, workspaceID, processed, total, len(skipped), errors)
-			continue
-		}
-		file, readSkip, readErr := scanner.ReadDiscoveredFile(ctx, root, metadata)
-		if readErr != nil {
-			errors++
-			c.recordError(ctx, runID, workspaceID, metadata.Path, "read", readErr)
-			processed++
-			c.progress(ctx, runID, workspaceID, processed, total, len(skipped), errors)
-			continue
-		}
-		if readSkip != nil {
-			skipped = append(skipped, *readSkip)
-			_ = c.DB.SaveIndexSkip(ctx, runID, workspaceID, readSkip.Path, readSkip.Reason)
-			c.Broker.Emit(workspaceID, "file_skipped", map[string]any{"path": readSkip.Path, "reason": readSkip.Reason})
-			c.progress(ctx, runID, workspaceID, processed, total, len(skipped), errors)
-			continue
-		}
-		if exists && previous.ContentHash == file.Hash {
-			if metadataErr := c.DB.UpdateRepositoryFileMetadata(ctx, workspaceID, file.Path, file.GitStatus, file.Size, file.ModifiedAtNS); metadataErr != nil {
+			file, parsed, chunks := result.file, result.parsed, result.chunks
+			c.Broker.Emit(workspaceID, "file_parsed", map[string]any{"path": file.Path, "symbols": len(parsed.Symbols), "chunks": len(chunks)})
+			record := knowledge.RepositoryFile{ID: db.NewID(), WorkspaceID: workspaceID, Path: file.Path, Language: file.Language, SizeBytes: file.Size, ModifiedAtNS: file.ModifiedAtNS, ContentHash: file.Hash, GitStatus: file.GitStatus}
+			if saveErr := c.DB.ReplaceIndexedFile(ctx, workspaceID, record, parsed.Symbols, chunks, nil, c.EmbeddingModel); saveErr != nil {
+				c.recordError(ctx, runID, workspaceID, file.Path, "persist", saveErr)
+				processed++
 				errors++
-				c.recordError(ctx, runID, workspaceID, file.Path, "metadata", metadataErr)
+				break
 			}
-			processed++
-			reused++
-			c.progress(ctx, runID, workspaceID, processed, total, len(skipped), errors)
-			continue
-		}
-		c.fileMu.Lock()
-		parsed, parseErr := c.Parser.Parse(ctx, file.Path, file.Content)
-		if parseErr != nil {
-			c.fileMu.Unlock()
-			errors++
-			c.recordError(ctx, runID, workspaceID, file.Path, "parse", parseErr)
-			continue
-		}
-		chunks, chunkErr := c.Chunker.Chunk(parsed)
-		if chunkErr != nil {
-			c.fileMu.Unlock()
-			errors++
-			c.recordError(ctx, runID, workspaceID, file.Path, "chunk", chunkErr)
-			continue
-		}
-		c.Broker.Emit(workspaceID, "file_parsed", map[string]any{"path": file.Path, "symbols": len(parsed.Symbols), "chunks": len(chunks)})
-		record := knowledge.RepositoryFile{ID: db.NewID(), WorkspaceID: workspaceID, Path: file.Path, Language: file.Language, SizeBytes: file.Size, ModifiedAtNS: file.ModifiedAtNS, ContentHash: file.Hash, GitStatus: file.GitStatus}
-		if saveErr := c.DB.ReplaceIndexedFile(ctx, workspaceID, record, parsed.Symbols, chunks, nil, c.EmbeddingModel); saveErr != nil {
-			c.fileMu.Unlock()
-			errors++
-			c.recordError(ctx, runID, workspaceID, file.Path, "persist", saveErr)
-			continue
-		}
-		if relationshipErr := c.DB.ReplaceFileRelationships(ctx, workspaceID, file.Path, parsed.Imports); relationshipErr != nil {
-			errors++
-			c.recordError(ctx, runID, workspaceID, file.Path, "relationships", relationshipErr)
-		}
-		for _, fact := range DetectFacts(*file) {
-			if factErr := c.DB.UpsertVerifiedFact(ctx, workspaceID, fact); factErr != nil {
+			if relationshipErr := c.DB.ReplaceFileRelationships(ctx, workspaceID, file.Path, parsed.Imports); relationshipErr != nil {
 				errors++
-				c.recordError(ctx, runID, workspaceID, file.Path, "facts", factErr)
+				c.recordError(ctx, runID, workspaceID, file.Path, "relationships", relationshipErr)
 			}
+			for _, fact := range DetectFacts(*file) {
+				if factErr := c.DB.UpsertVerifiedFact(ctx, workspaceID, fact); factErr != nil {
+					errors++
+					c.recordError(ctx, runID, workspaceID, file.Path, "facts", factErr)
+				}
+			}
+			c.enqueueEnrichment(ctx, enrichmentJob{runID: runID, workspaceID: workspaceID, root: root, file: *file})
+			changed++
+			processed++
 		}
-		c.fileMu.Unlock()
-		c.enqueueEnrichment(ctx, enrichmentJob{runID: runID, workspaceID: workspaceID, root: root, file: *file})
-		changed++
-		processed++
+
 		c.progress(ctx, runID, workspaceID, processed, total, len(skipped), errors)
+	}
+
+	if ctx.Err() != nil {
+		_ = c.DB.UpdateIndexRun(context.Background(), runID, "cancelled", processed, len(skipped), errors, ctx.Err().Error())
+		c.Broker.Emit(workspaceID, "index_cancelled", map[string]any{"run_id": runID})
+		return
 	}
 	discovered := map[string]bool{}
 	for _, file := range files {

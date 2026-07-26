@@ -5,10 +5,14 @@ import (
 )
 
 type Message struct {
-	ID            string    `json:"id"`
-	SessionID     string    `json:"session_id"`
-	Role          string    `json:"role"`
-	Content       string    `json:"content"`
+	ID        string `json:"id"`
+	SessionID string `json:"session_id"`
+	Role      string `json:"role"`
+	Content   string `json:"content"`
+	// Timeline is the JSON event log of the agent's reasoning trace for an
+	// assistant message ("" for user messages). The client replays it to
+	// rebuild the same timeline it showed live.
+	Timeline      string    `json:"timeline,omitempty"`
 	IsCheckpoint  bool      `json:"is_checkpoint"`
 	TokenEstimate int       `json:"token_estimate"`
 	Sequence      int       `json:"sequence"`
@@ -27,6 +31,12 @@ type Checkpoint struct {
 }
 
 func (d *DB) AppendMessage(id, sessionID, role, content string, isCheckpoint bool, tokenEstimate int) (*Message, error) {
+	return d.AppendMessageWithTimeline(id, sessionID, role, content, "", isCheckpoint, tokenEstimate)
+}
+
+// AppendMessageWithTimeline stores a message along with the agent's reasoning
+// trace. Pass "" for timeline when there is none (user messages, direct chat).
+func (d *DB) AppendMessageWithTimeline(id, sessionID, role, content, timeline string, isCheckpoint bool, tokenEstimate int) (*Message, error) {
 	// Need to find max sequence and increment it
 	tx, err := d.Begin()
 	if err != nil {
@@ -41,9 +51,9 @@ func (d *DB) AppendMessage(id, sessionID, role, content string, isCheckpoint boo
 	}
 
 	_, err = tx.Exec(`
-		INSERT INTO messages (id, session_id, role, content, is_checkpoint, token_estimate, sequence)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, id, sessionID, role, content, isCheckpoint, tokenEstimate, nextSeq)
+		INSERT INTO messages (id, session_id, role, content, timeline, is_checkpoint, token_estimate, sequence)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, id, sessionID, role, content, timeline, isCheckpoint, tokenEstimate, nextSeq)
 	if err != nil {
 		return nil, err
 	}
@@ -57,6 +67,7 @@ func (d *DB) AppendMessage(id, sessionID, role, content string, isCheckpoint boo
 		SessionID:     sessionID,
 		Role:          role,
 		Content:       content,
+		Timeline:      timeline,
 		IsCheckpoint:  isCheckpoint,
 		TokenEstimate: tokenEstimate,
 		Sequence:      nextSeq,
@@ -66,7 +77,7 @@ func (d *DB) AppendMessage(id, sessionID, role, content string, isCheckpoint boo
 
 func (d *DB) GetMessages(sessionID string) ([]Message, error) {
 	rows, err := d.Query(`
-		SELECT id, session_id, role, content, is_checkpoint, token_estimate, sequence, created_at 
+		SELECT id, session_id, role, content, COALESCE(timeline,''), is_checkpoint, token_estimate, sequence, created_at
 		FROM messages WHERE session_id = ? ORDER BY sequence ASC
 	`, sessionID)
 	if err != nil {
@@ -77,7 +88,7 @@ func (d *DB) GetMessages(sessionID string) ([]Message, error) {
 	var msgs []Message
 	for rows.Next() {
 		var m Message
-		if err := rows.Scan(&m.ID, &m.SessionID, &m.Role, &m.Content, &m.IsCheckpoint, &m.TokenEstimate, &m.Sequence, &m.CreatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.SessionID, &m.Role, &m.Content, &m.Timeline, &m.IsCheckpoint, &m.TokenEstimate, &m.Sequence, &m.CreatedAt); err != nil {
 			return nil, err
 		}
 		msgs = append(msgs, m)

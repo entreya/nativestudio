@@ -24,6 +24,25 @@ const DEFAULT_EDITOR_SETTINGS = {
   matchBrackets: 'always', // 'always', 'never', 'near'
 };
 
+// --- Agent Settings ---
+// maxThinkingTokens mirrors agent/settings.go's defaultMaxThinkingTokens —
+// how many thinking tokens a single generation step may spend before the
+// backend cuts it off as a runaway reasoning loop. Exposed here so it can be
+// tuned from the Settings page without a server restart.
+const DEFAULT_AGENT_SETTINGS = {
+  maxThinkingTokens: 1200,
+  // Mirrors agent/settings.go's defaultForceUnloadAfterChats — periodically
+  // forces Ollama to unload the model after this many chat requests, even
+  // under continuous back-to-back use where a plain idle timeout would
+  // never fire. 0 disables this and relies on keep_alive alone.
+  forceUnloadAfterChats: 100,
+  // Mirrors agent/settings.go's defaultResponseTemperature. Ollama's
+  // sampling temperature: 0 always picks the most likely token, 1 is as far
+  // as this app's slider goes before output stops reading as coherent code
+  // or prose for most local models.
+  temperature: 0.7,
+};
+
 export function AppStateProvider({ children }) {
   const navigate = useNavigate();
 
@@ -32,6 +51,7 @@ export function AppStateProvider({ children }) {
   const [fontSettingsOpen, setFontSettingsOpen] = useState(false);
   const [fontSettings, setFontSettings] = useState(DEFAULT_FONT_SETTINGS);
   const [editorSettings, setEditorSettings] = useState(DEFAULT_EDITOR_SETTINGS);
+  const [agentSettings, setAgentSettings] = useState(DEFAULT_AGENT_SETTINGS);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
 
   const [workspacePickerMode, setWorkspacePickerMode] = useState(null);
@@ -40,7 +60,7 @@ export function AppStateProvider({ children }) {
   const [activeProject, setActiveProject] = useState(null);
   const [requestedSessionId, setRequestedSessionId] = useState('');
   const [aiPreview, setAiPreview] = useState(null);
-  const [layout, setLayout] = useState({ folders: true, code: true, ai: true });
+  const [layout, setLayout] = useState({ folders: true, code: true, ai: true, terminal: false });
   const [indexStatus, setIndexStatus] = useState({
     status: 'idle', processed: 0, total: 0, skipped: 0, errors: 0,
     enrichmentStatus: 'idle', enrichmentRemaining: 0, enrichmentPath: '',
@@ -60,6 +80,16 @@ export function AppStateProvider({ children }) {
   const [chatWidth, setChatWidth] = useState(360);
   const sidebarStartRef = useRef(260);
   const chatStartRef = useRef(360);
+  const [terminalHeight, setTerminalHeight] = useState(280);
+  const terminalStartRef = useRef(280);
+  // Cross-component bridge: ChatPanel pushes the AI agent's own run_terminal
+  // activity here so TerminalPanel (a separate component, no direct SSE
+  // access of its own) can print it into the same visible terminal, clearly
+  // marked apart from the user's own interactive shell.
+  const [terminalActivity, setTerminalActivity] = useState([]);
+  const pushTerminalActivity = useCallback(entry => {
+    setTerminalActivity(prev => [...prev, { ...entry, id: `${Date.now()}-${Math.random()}` }]);
+  }, []);
 
   const activeTheme = getStudioTheme(themeID);
   const studioStyle = themeVariables(activeTheme);
@@ -69,6 +99,9 @@ export function AppStateProvider({ children }) {
     token: {
       colorPrimary: activeTheme.accent,
       colorInfo: activeTheme.accent,
+      colorSuccess: activeTheme.success,
+      colorWarning: activeTheme.warning,
+      colorError: activeTheme.danger,
       colorBgBase: activeTheme.bg,
       colorBgContainer: activeTheme.surface,
       colorBgElevated: activeTheme.surface,
@@ -92,6 +125,7 @@ export function AppStateProvider({ children }) {
         if (data.themeID) setThemeID(data.themeID);
         if (data.fontSettings) setFontSettings({ ...DEFAULT_FONT_SETTINGS, ...data.fontSettings });
         if (data.editorSettings) setEditorSettings({ ...DEFAULT_EDITOR_SETTINGS, ...data.editorSettings });
+        if (data.agentSettings) setAgentSettings({ ...DEFAULT_AGENT_SETTINGS, ...data.agentSettings });
         setSettingsLoaded(true);
       })
       .catch(err => {
@@ -101,23 +135,23 @@ export function AppStateProvider({ children }) {
     return () => { cancelled = true; };
   }, []);
 
-  const saveSettingsToAPI = (theme, font, editor) => {
+  const saveSettingsToAPI = (theme, font, editor, agentPrefs) => {
     fetch('/api/settings', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ themeID: theme, fontSettings: font, editorSettings: editor })
+      body: JSON.stringify({ themeID: theme, fontSettings: font, editorSettings: editor, agentSettings: agentPrefs })
     }).catch(console.error);
   };
 
   const selectTheme = id => {
     setThemeID(id);
-    saveSettingsToAPI(id, fontSettings, editorSettings);
+    saveSettingsToAPI(id, fontSettings, editorSettings, agentSettings);
   };
 
   const updateFontSettings = patch => {
     setFontSettings(prev => {
       const next = { ...prev, ...patch };
-      saveSettingsToAPI(themeID, next, editorSettings);
+      saveSettingsToAPI(themeID, next, editorSettings, agentSettings);
       return next;
     });
   };
@@ -125,7 +159,15 @@ export function AppStateProvider({ children }) {
   const updateEditorSettings = (updates) => {
     setEditorSettings(prev => {
       const next = { ...prev, ...updates };
-      saveSettingsToAPI(themeID, fontSettings, next);
+      saveSettingsToAPI(themeID, fontSettings, next, agentSettings);
+      return next;
+    });
+  };
+
+  const updateAgentSettings = (updates) => {
+    setAgentSettings(prev => {
+      const next = { ...prev, ...updates };
+      saveSettingsToAPI(themeID, fontSettings, editorSettings, next);
       return next;
     });
   };
@@ -183,7 +225,12 @@ export function AppStateProvider({ children }) {
           setIndexStatus(current => ({ ...current, ...data, status: 'running' }));
           if (update.type === 'index_started' && (data.total || 0) > 1) setScanNotificationMinimized(false);
         } else if (update.type === 'index_completed') {
-          setIndexStatus(current => ({ ...current, ...data, status: data.errors ? 'completed_with_errors' : 'completed' }));
+          // The file watcher emits this per single-file save with its own
+          // processed/skipped totals — spreading those would overwrite a full
+          // scan's real progress with "1 file" numbers.
+          if (!data.incremental) {
+            setIndexStatus(current => ({ ...current, ...data, status: data.errors ? 'completed_with_errors' : 'completed' }));
+          }
         } else if (update.type === 'enrichment_queued') {
           setIndexStatus(current => ({ ...current, enrichmentStatus: 'queued', enrichmentRemaining: data.remaining || 0 }));
         } else if (update.type === 'enrichment_started') {
@@ -210,6 +257,12 @@ export function AppStateProvider({ children }) {
           enrichStartTimes.current = {};
         } else if (update.type === 'enrichment_pending_confirmation') {
           setIndexStatus(current => ({ ...current, enrichmentStatus: 'pending_confirmation', enrichmentRemaining: data.remaining || 0 }));
+        } else if (update.type === 'enrichment_declined') {
+          setIndexStatus(current => ({ ...current, enrichmentStatus: 'declined' }));
+        } else if (update.type === 'enrichment_paused') {
+          setIndexStatus(current => ({ ...current, enrichmentStatus: 'paused', enrichmentRemaining: data.remaining ?? current.enrichmentRemaining }));
+        } else if (update.type === 'enrichment_resumed') {
+          setIndexStatus(current => ({ ...current, enrichmentStatus: 'running' }));
         } else if (update.type === 'index_error' && !data.path && !data.stage) {
           setIndexStatus(current => ({ ...current, ...data, status: 'failed' }));
         }
@@ -227,6 +280,11 @@ export function AppStateProvider({ children }) {
   }, [activeProject?.id]);
 
   async function selectProject(proj) {
+    // Reopening the project the user is already in (e.g. Home -> same
+    // workspace) should land them back where they were, not wipe their open
+    // tabs and force a rescan — only a genuine switch to a different project
+    // needs that reset.
+    const isSameProject = activeProject?.id === proj.id;
     try {
       const res = await fetch('/api/workspace', {
         method: 'POST',
@@ -234,12 +292,14 @@ export function AppStateProvider({ children }) {
         body: JSON.stringify({ project_id: proj.id, path: proj.path })
       });
       if (res.ok) {
-        setIndexStatus({ status: 'scanning', processed: 0, total: 0, skipped: 0, errors: 0 });
-        setScanNotificationMinimized(false);
         setActiveProject(proj);
-        setRefreshTrigger(prev => prev + 1);
-        setOpenFiles([]);
-        setActiveTab('');
+        if (!isSameProject) {
+          setIndexStatus({ status: 'scanning', processed: 0, total: 0, skipped: 0, errors: 0 });
+          setScanNotificationMinimized(false);
+          setRefreshTrigger(prev => prev + 1);
+          setOpenFiles([]);
+          setActiveTab('');
+        }
       }
     } catch (e) { console.error(e); }
   }
@@ -266,6 +326,35 @@ export function AppStateProvider({ children }) {
     if (!activeProject) return;
     try {
       await fetch(`/api/projects/${activeProject.id}/knowledge/enrichment/approve`, { method: 'POST' });
+    } catch (e) { console.error(e); }
+  }, [activeProject]);
+
+  // "Not now" — dismisses the approval card without cancelling the scan or
+  // the file watcher (unlike stopIndexing, which cancels everything). The
+  // queued jobs stay queued so a later approveEnrichment can still run them.
+  const declineEnrichment = useCallback(async () => {
+    if (!activeProject) return;
+    setIndexStatus(current => ({ ...current, enrichmentStatus: 'declined' }));
+    try {
+      await fetch(`/api/projects/${activeProject.id}/knowledge/enrichment/decline`, { method: 'POST' });
+    } catch (e) { console.error(e); }
+  }, [activeProject]);
+
+  // Pause/resume suspend enrichment between files without cancelling the run,
+  // so the queue survives and resuming continues from where it stopped.
+  const pauseEnrichment = useCallback(async () => {
+    if (!activeProject) return;
+    setIndexStatus(current => ({ ...current, enrichmentStatus: 'paused' }));
+    try {
+      await fetch(`/api/projects/${activeProject.id}/knowledge/enrichment/pause`, { method: 'POST' });
+    } catch (e) { console.error(e); }
+  }, [activeProject]);
+
+  const resumeEnrichment = useCallback(async () => {
+    if (!activeProject) return;
+    setIndexStatus(current => ({ ...current, enrichmentStatus: 'running' }));
+    try {
+      await fetch(`/api/projects/${activeProject.id}/knowledge/enrichment/resume`, { method: 'POST' });
     } catch (e) { console.error(e); }
   }, [activeProject]);
 
@@ -433,6 +522,12 @@ export function AppStateProvider({ children }) {
     setChatWidth(newW);
   }, []);
 
+  const handleTerminalDrag = useCallback((currentY, startY) => {
+    const delta = startY - currentY;
+    const newH = Math.max(120, Math.min(700, terminalStartRef.current + delta));
+    setTerminalHeight(newH);
+  }, []);
+
   const toggleLayout = (pane) => {
     setLayout(current => ({ ...current, [pane]: !current[pane] }));
   };
@@ -445,7 +540,8 @@ export function AppStateProvider({ children }) {
   };
 
   const handleNavigate = (key) => {
-    if (key === 'conversations') navigate('/conversations');
+    if (key === 'home') navigate('/');
+    else if (key === 'conversations') navigate('/conversations');
     else if (key === 'knowledge' && activeProject) navigate(`/projects/${activeProject.id}/knowledge`);
     else if (key === 'db' && activeProject) navigate(`/projects/${activeProject.id}/db`);
     else if (key === 'settings') {
@@ -482,17 +578,21 @@ export function AppStateProvider({ children }) {
     const enrAgg     = enrStatus === 'aggregating';
     const enrDone    = enrStatus === 'done';
     const enrPending = enrStatus === 'pending_confirmation';
-    if (enrActive || enrAgg || enrDone || enrPending) {
+    const enrPaused  = enrStatus === 'paused';
+    if (enrActive || enrAgg || enrDone || enrPending || enrPaused) {
       const durSec = s.enrichmentDurationMs > 0
         ? (s.enrichmentDurationMs / 1000).toFixed(1) + 's'
         : '—';
       procs.push({
         id: 'enrichment',
         phase: 'enrichment',
-        status: enrPending ? 'pending_confirmation' : ((enrActive || enrAgg) ? 'running' : 'done'),
+        status: enrPending ? 'pending_confirmation' : (enrPaused ? 'paused' : ((enrActive || enrAgg) ? 'running' : 'done')),
+        // Only the per-file enrichment stage can be paused — the aggregation
+        // pass is a single model call with nothing to suspend between.
+        pausable: enrActive,
         label: enrPending
           ? `Ready to build AI knowledge for ${s.enrichmentRemaining || 0} file${s.enrichmentRemaining === 1 ? '' : 's'}`
-          : (enrAgg ? 'Building module summaries' : (enrDone ? 'AI knowledge ready' : 'Enriching AI knowledge')),
+          : (enrPaused ? `Paused — ${s.enrichmentRemaining || 0} file${s.enrichmentRemaining === 1 ? '' : 's'} left` : (enrAgg ? 'Building module summaries' : (enrDone ? 'AI knowledge ready' : 'Enriching AI knowledge'))),
         detail: s.enrichmentPath || '',
         progress: null,     // indeterminate
         stats: enrPending ? {} : {
@@ -511,6 +611,7 @@ export function AppStateProvider({ children }) {
     themeID, themeSettingsOpen, setThemeSettingsOpen, selectTheme,
     fontSettingsOpen, setFontSettingsOpen, fontSettings, updateFontSettings,
     editorSettings, updateEditorSettings,
+    agentSettings, updateAgentSettings,
     activeTheme, studioStyle, studioClassName, antTheme,
     workspacePickerMode, setWorkspacePickerMode, handleWorkspacePickerSelect,
     projects, projectsLoaded, activeProject, selectProject, switchToProject,
@@ -521,12 +622,17 @@ export function AppStateProvider({ children }) {
     indexStatus, setIndexStatus, scanNotificationMinimized, setScanNotificationMinimized,
     stopIndexing,
     approveEnrichment,
+    declineEnrichment,
+    pauseEnrichment,
+    resumeEnrichment,
     indexProcesses,
     editorCtx,
     openFiles, activeTab, refreshTrigger, setRefreshTrigger,
     openFile, openFileFromRoute, handleTabChange, handleTabEdit,
     handleFileRenamed, handleFileDeleted, updateCursorAndSync,
     sidebarWidth, chatWidth, handleSidebarDrag, handleChatDrag, sidebarStartRef, chatStartRef,
+    terminalHeight, handleTerminalDrag, terminalStartRef,
+    terminalActivity, pushTerminalActivity,
     handleOpenConversation, handleNavigate,
   };
 

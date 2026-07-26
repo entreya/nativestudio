@@ -10,11 +10,15 @@ import (
 )
 
 type Message struct {
-	Role         string    `json:"role"`
-	Content      string    `json:"content"`
-	Timestamp    time.Time `json:"timestamp"`
-	IsCheckpoint bool      `json:"is_checkpoint"`
-	Sequence     int       `json:"-"`
+	Role      string    `json:"role"`
+	Content   string    `json:"content"`
+	Timestamp time.Time `json:"timestamp"`
+	// Timeline is the agent's reasoning-trace event log as JSON, persisted so
+	// a reloaded conversation can show the same trace it showed live. Empty
+	// for user messages and direct (non-agent) replies.
+	Timeline     string `json:"timeline,omitempty"`
+	IsCheckpoint bool   `json:"is_checkpoint"`
+	Sequence     int    `json:"-"`
 }
 
 type Checkpoint struct {
@@ -82,7 +86,7 @@ func (s *DBStore) AppendMessage(sessionID string, msg Message) *db.Message {
 		msg.Timestamp = time.Now()
 	}
 	est := EstimateMessagesTokens([]Message{msg})
-	saved, err := s.database.AppendMessage(newID(), sessionID, msg.Role, msg.Content, msg.IsCheckpoint, est)
+	saved, err := s.database.AppendMessageWithTimeline(newID(), sessionID, msg.Role, msg.Content, msg.Timeline, msg.IsCheckpoint, est)
 	if err != nil {
 		log.Printf("Failed to append message to DB: %v", err)
 		return nil
@@ -102,6 +106,7 @@ func (s *DBStore) GetMessagesFromDB(sessionID string) ([]Message, error) {
 			Role:         m.Role,
 			Content:      m.Content,
 			Timestamp:    m.CreatedAt,
+			Timeline:     m.Timeline,
 			IsCheckpoint: m.IsCheckpoint,
 			Sequence:     m.Sequence,
 		})

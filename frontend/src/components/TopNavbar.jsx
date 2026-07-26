@@ -7,19 +7,20 @@ import {
   InfoCircleOutlined,
   MessageOutlined,
   QuestionCircleOutlined,
-  CodeOutlined,
-  RobotOutlined,
+  HomeOutlined,
+  BulbOutlined,
   BellOutlined,
   SettingOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons';
 import { useAppState } from '../state/useAppState';
 import IndexActivityWidget from './IndexActivityWidget';
+import LayoutPicker from './LayoutPicker';
 
 const { Text } = Typography;
 
 export default function TopNavbar({ folderName, onNavigate, onOpenFile, onOpenFolder, layout, onToggleLayout }) {
-  const { indexProcesses, stopIndexing, approveEnrichment } = useAppState();
+  const { indexProcesses, stopIndexing, approveEnrichment, declineEnrichment, pauseEnrichment, resumeEnrichment } = useAppState();
 
   // Open the notification panel by default whenever there's something to
   // see — either on first load (work already in progress) or the moment new
@@ -51,27 +52,39 @@ export default function TopNavbar({ folderName, onNavigate, onOpenFile, onOpenFo
     title: 'About NativeStudio',
     content: 'A local-first AI code editor powered by Ollama, persistent conversations, and reviewable code changes.',
   });
+  // Grouped by what the item does rather than one flat "File" list holding
+  // opening files, navigating to three different pages, and settings all at
+  // once. Splitting them means each menu answers one question.
   const fileItems = [
     { key: 'open-file', icon: <FileOutlined />, label: 'Open File…' },
     { key: 'open-folder', icon: <FolderOpenOutlined />, label: 'Open Folder…' },
     { type: 'divider' },
+    { key: 'home', icon: <HomeOutlined />, label: 'Back to Projects' },
+  ];
+  const viewItems = [
     { key: 'conversations', icon: <MessageOutlined />, label: 'Conversations & Memory' },
-    { key: 'knowledge', icon: <DatabaseOutlined />, label: 'Project Knowledge' },
+    { key: 'knowledge', icon: <BulbOutlined />, label: 'Project Knowledge' },
     { key: 'database', icon: <DatabaseOutlined />, label: 'Database Explorer' },
+  ];
+  const toolItems = [
+    { key: 'free-memory', icon: <ThunderboltOutlined />, label: 'Free Up Memory' },
     { type: 'divider' },
-    { key: 'settings', icon: <SettingOutlined />, label: 'Settings (Themes & Fonts)' },
+    { key: 'settings', icon: <SettingOutlined />, label: 'Settings…' },
   ];
   const helpItems = [
-    { key: 'help', icon: <QuestionCircleOutlined />, label: 'Help' },
+    { key: 'help', icon: <QuestionCircleOutlined />, label: 'Keyboard Shortcuts' },
     { key: 'about', icon: <InfoCircleOutlined />, label: 'About NativeStudio' },
   ];
+
   const handleFileMenu = ({ key }) => {
     if (key === 'open-file') onOpenFile?.();
     if (key === 'open-folder') onOpenFolder?.();
-    if (key === 'conversations') onNavigate('conversations');
-    if (key === 'knowledge') onNavigate('knowledge');
-    if (key === 'database') onNavigate('db');
+    if (key === 'home') onNavigate('home');
+  };
+  const handleViewMenu = ({ key }) => onNavigate(key === 'database' ? 'db' : key);
+  const handleToolsMenu = ({ key }) => {
     if (key === 'settings') onNavigate('settings');
+    if (key === 'free-memory') handleFreeMemory();
   };
   const handleHelpMenu = ({ key }) => {
     if (key === 'help') showHelp();
@@ -105,48 +118,36 @@ export default function TopNavbar({ folderName, onNavigate, onOpenFile, onOpenFo
       {/* Left: App Menus */}
       <nav className="claude-app-menus" aria-label="Application menu">
         <Dropdown menu={{ items: fileItems, onClick: handleFileMenu }} trigger={['click']} placement="bottomLeft">
-          <Button type="text" style={{ fontWeight: 500 }}>File</Button>
+          <Button type="text" size="small" style={{ fontWeight: 500 }}>File</Button>
+        </Dropdown>
+        <Dropdown menu={{ items: viewItems, onClick: handleViewMenu }} trigger={['click']} placement="bottomLeft">
+          <Button type="text" size="small" style={{ fontWeight: 500 }}>View</Button>
+        </Dropdown>
+        <Dropdown menu={{ items: toolItems, onClick: handleToolsMenu }} trigger={['click']} placement="bottomLeft">
+          <Button type="text" size="small" style={{ fontWeight: 500 }}>Tools</Button>
         </Dropdown>
         <Dropdown menu={{ items: helpItems, onClick: handleHelpMenu }} trigger={['click']} placement="bottomLeft">
-          <Button type="text" style={{ fontWeight: 500 }}>Help</Button>
+          <Button type="text" size="small" style={{ fontWeight: 500 }}>Help</Button>
         </Dropdown>
       </nav>
 
-      {/* Center: Project/Folder Name */}
+      {/* Center: Project/Folder Name — click to return to the home workspace */}
       <div className="claude-nav-center">
-        <div className="claude-nav-folder">
-          {folderName ? (
-            <><FolderOpenOutlined style={{ color: 'var(--studio-accent, #c15f3c)' }} /><Text strong>{folderName}</Text></>
-          ) : (
-            <><DatabaseOutlined style={{ color: 'var(--studio-accent, #c15f3c)' }} /><Text strong>All projects</Text></>
-          )}
-        </div>
+        <Tooltip title="Back to home workspace">
+          <div className="claude-nav-folder claude-nav-folder-clickable" onClick={() => onNavigate('home')} role="button" tabIndex={0}>
+            {folderName ? (
+              <><FolderOpenOutlined style={{ color: 'var(--studio-accent, #c15f3c)' }} /><Text strong>{folderName}</Text></>
+            ) : (
+              <><DatabaseOutlined style={{ color: 'var(--studio-accent, #c15f3c)' }} /><Text strong>All projects</Text></>
+            )}
+          </div>
+        </Tooltip>
       </div>
 
-      {/* Right: Layout Switcher and Notifications */}
+      {/* Right: Layout Picker and Notifications */}
       <div className="claude-nav-right">
-        {layout && (
-          <div className="layout-switcher" aria-label="Layout visibility">
-            {[
-              { key: 'folders', label: 'Folders', icon: <FolderOpenOutlined /> },
-              { key: 'code', label: 'Code', icon: <CodeOutlined /> },
-              { key: 'ai', label: 'AI', icon: <RobotOutlined /> },
-            ].map(item => (
-              <Tooltip key={item.key} title={`${layout[item.key] ? 'Hide' : 'Show'} ${item.label}`}>
-                <Button
-                  type="text"
-                  size="small"
-                  className={layout[item.key] ? 'is-visible' : ''}
-                  aria-label={`${layout[item.key] ? 'Hide' : 'Show'} ${item.label}`}
-                  aria-pressed={layout[item.key]}
-                  icon={item.icon}
-                  onClick={() => onToggleLayout?.(item.key)}
-                />
-              </Tooltip>
-            ))}
-          </div>
-        )}
-        
+        <LayoutPicker layout={layout} onToggleLayout={onToggleLayout} />
+
         <div>
           <Popover
             placement="bottomRight"
@@ -154,7 +155,7 @@ export default function TopNavbar({ folderName, onNavigate, onOpenFile, onOpenFo
             content={
               <div>
                 {indexProcesses && indexProcesses.length > 0
-                  ? <IndexActivityWidget processes={indexProcesses} onStop={stopIndexing} onApprove={approveEnrichment} />
+                  ? <IndexActivityWidget processes={indexProcesses} onStop={stopIndexing} onApprove={approveEnrichment} onDecline={declineEnrichment} onPause={pauseEnrichment} onResume={resumeEnrichment} />
                   : <Text type="secondary" style={{ padding: '8px 4px' }}>Nothing to report</Text>}
                 <Divider style={{ margin: '10px 0' }} />
                 <Button type="text" size="small" icon={<ThunderboltOutlined />} loading={unloading} onClick={handleFreeMemory} style={{ width: '100%', justifyContent: 'flex-start', color: 'var(--studio-muted, #746b63)' }}>
@@ -166,7 +167,7 @@ export default function TopNavbar({ folderName, onNavigate, onOpenFile, onOpenFo
             open={notifOpen}
             onOpenChange={setNotifOpen}
           >
-            <Badge count={indexProcesses?.filter(p => p.status === 'running' || p.status === 'pending_confirmation').length || 0} size="small">
+            <Badge count={indexProcesses?.filter(p => p.status === 'running' || p.status === 'pending_confirmation' || p.status === 'paused').length || 0} size="small">
               <Button type="text" icon={<BellOutlined />} style={{ borderRadius: '50%' }} />
             </Badge>
           </Popover>

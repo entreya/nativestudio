@@ -39,6 +39,41 @@ func TestNeedsInternetSearchIgnoresCodingCurrentPhrases(t *testing.T) {
 	}
 }
 
+// TestPromptRequestsExplanationGatesRephrasing verifies the guard added
+// after a live finding: rephraserModel (agent/rephrase.go) doesn't just
+// rewrite an "explain this function" style request — it answers it,
+// fabricating a description of code it has never seen. Prompts matching
+// this pattern must skip the rephrase call entirely (Agent.Run uses this to
+// decide) rather than risk that.
+func TestPromptRequestsExplanationGatesRephrasing(t *testing.T) {
+	shouldSkip := []string{
+		"explain this function",
+		"can you describe what SiteController does",
+		"please review this code",
+		"what does this method do",
+		"how does the resolver work",
+		"analyze this file for bugs",
+		"summarize this file",
+	}
+	for _, prompt := range shouldSkip {
+		if !promptRequestsExplanation(prompt) {
+			t.Errorf("expected %q to be detected as an explanation request", prompt)
+		}
+	}
+
+	shouldRephrase := []string{
+		"help method bana jimsme 5000 loop likha ho",
+		"SiteController mein hello action hata do",
+		"install a basic yii2 app in the current folder",
+		"rename this variable to userCount",
+	}
+	for _, prompt := range shouldRephrase {
+		if promptRequestsExplanation(prompt) {
+			t.Errorf("expected %q to NOT be detected as an explanation request", prompt)
+		}
+	}
+}
+
 func newAgentTestEnvironment(t *testing.T) (*Agent, string, string) {
 	t.Helper()
 	root := t.TempDir()
@@ -137,5 +172,86 @@ func TestAgentDoesNotRetryWhenToolAlreadyCalled(t *testing.T) {
 	}
 	if !strings.Contains(finalContent, "```") {
 		t.Fatalf("expected the original response (with its code block) to be left alone, got %q", finalContent)
+	}
+}
+
+// TestBudgetExceededTwiceDoesNotEchoAnEarlierTurnsAnswer reproduces a live
+// bug: in a multi-turn conversation, asking the same question twice — where
+// both the initial attempt and its one corrective-nudge retry blow the
+// thinking-token budget without producing anything new — echoed the FIRST
+// turn's real answer back as if it were a fresh response to the SECOND
+// turn, because the old logic scanned all of `messages` backward for any
+// assistant-role entry, and a prior turn's genuine reply is still sitting
+// right there in history. It should instead recognize that this turn
+// produced nothing new and fall back to the graceful timeout message.
+func TestBudgetExceededTwiceDoesNotEchoAnEarlierTurnsAnswer(t *testing.T) {
+	agentInstance, _, sessionID := newAgentTestEnvironment(t)
+
+	const earlierAnswer = "Yes. I found current reporting that matches your question. Here are the most relevant reports: ..."
+	ctxpkg.Store.AppendMessage(sessionID, ctxpkg.Message{Role: "user", Content: "what is todays date"})
+	ctxpkg.Store.AppendMessage(sessionID, ctxpkg.Message{Role: "assistant", Content: earlierAnswer})
+
+	var runaway strings.Builder
+	for i := 0; i < defaultMaxThinkingTokens*2; i++ {
+		runaway.WriteString(`{"message":{"thinking":"still thinking "}}` + "\n")
+	}
+	// Both the first attempt and the corrective-nudge retry blow the budget —
+	// scriptedTransport serves the same runaway body to every request.
+	withTransport(t, scriptedTransport(t, []string{runaway.String(), runaway.String()}))
+
+	finalContent, err := agentInstance.Run(context.Background(), sessionID, "what is todays date", "test", false, "", editor.EditorState{}, func(string, any) {})
+	if err != nil {
+		t.Fatalf("Run returned an error: %v", err)
+	}
+	if strings.Contains(finalContent, earlierAnswer) || finalContent == earlierAnswer {
+		t.Fatalf("expected the stale earlier-turn answer NOT to be echoed back, got %q", finalContent)
+	}
+	if !strings.Contains(finalContent, "having trouble") {
+		t.Fatalf("expected the graceful timeout message, got %q", finalContent)
+	}
+}
+
+// TestAgentNudgesPastRunawayThinking reproduces (deterministically) the live
+// failure where a small model spent thousands of thinking tokens re-deriving
+// the same conclusion without ever committing to an action. The first
+// scripted response simulates that — far more thinking-only lines than
+// maxThinkingTokens, no done — which run.Step must cut off on its own rather
+// than reading to completion. Run should then give it one direct nudge
+// ("stop analyzing, act now") and use the second scripted response — a real
+// tool call — as the actual result, the same "one corrective chance" pattern
+// already proven for narratedInsteadOfActing.
+func TestAgentNudgesPastRunawayThinking(t *testing.T) {
+	agentInstance, _, sessionID := newAgentTestEnvironment(t)
+
+	var runaway strings.Builder
+	for i := 0; i < defaultMaxThinkingTokens*2; i++ {
+		runaway.WriteString(`{"message":{"thinking":"still thinking "}}` + "\n")
+	}
+
+	withTransport(t, scriptedTransport(t, []string{
+		runaway.String(),
+		`{"message":{"tool_calls":[{"id":"call-1","function":{"name":"read_file","arguments":{"path":"HelpController.php"}}}]},"done":true}`,
+		`{"message":{"content":"Here is the file."},"done":true}`,
+	}))
+
+	var toolCalls []string
+	emit := func(event string, data any) {
+		if event != "tool_call" {
+			return
+		}
+		if m, ok := data.(map[string]any); ok {
+			toolCalls = append(toolCalls, m["name"].(string))
+		}
+	}
+
+	finalContent, err := agentInstance.Run(context.Background(), sessionID, "show me HelpController.php", "test", false, "", editor.EditorState{}, emit)
+	if err != nil {
+		t.Fatalf("Run returned an error: %v", err)
+	}
+	if len(toolCalls) != 1 || toolCalls[0] != "read_file" {
+		t.Fatalf("expected the thinking-budget nudge to result in exactly one read_file call, got %v", toolCalls)
+	}
+	if finalContent != "Here is the file." {
+		t.Fatalf("expected the final answer to come from after the nudge's tool call completed, got %q", finalContent)
 	}
 }

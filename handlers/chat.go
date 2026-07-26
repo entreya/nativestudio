@@ -1,27 +1,36 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/entreya/nativestudio/agent"
-	"github.com/entreya/nativestudio/context"
+	ctxpkg "github.com/entreya/nativestudio/context"
 	"github.com/entreya/nativestudio/db"
 	"github.com/entreya/nativestudio/editor"
 )
 
+// chatRunTimeout bounds an agent run once it's been deliberately detached
+// from the request context (see HandleChat) — a backstop against a
+// genuinely wedged model/tool call, not a limit that's meant to fire in
+// normal use. The per-step Ollama call already has its own 10-minute
+// timeout (agent/loop.go); this allows headroom for several such steps in
+// one run.
+const chatRunTimeout = 30 * time.Minute
+
 // ChatHandler manages chat requests proxying to Ollama via the Agent.
 type ChatHandler struct {
 	OllamaURL  string
-	ContextCfg context.Config
+	ContextCfg ctxpkg.Config
 	Agent      *agent.Agent
 	DB         *db.DB
 }
 
 // NewChatHandler creates a new ChatHandler.
-func NewChatHandler(ollamaURL string, ctxCfg context.Config, agentRunner *agent.Agent, database *db.DB) *ChatHandler {
+func NewChatHandler(ollamaURL string, ctxCfg ctxpkg.Config, agentRunner *agent.Agent, database *db.DB) *ChatHandler {
 	return &ChatHandler{
 		OllamaURL:  ollamaURL,
 		ContextCfg: ctxCfg,
@@ -83,11 +92,11 @@ func (h *ChatHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	// Look up the model's real context window (cached after the first call per
 	// model) instead of guessing from its name — matters most for custom or
 	// fine-tuned models the name-prefix heuristic doesn't recognize.
-	context.RefreshModelContextWindow(h.OllamaURL, reqBody.Model)
+	ctxpkg.RefreshModelContextWindow(h.OllamaURL, reqBody.Model)
 
 	// Check token usage
-	_, _, pct := context.Store.GetTokenUsage(reqBody.SessionID, reqBody.Model)
-	if context.ShouldBlock(pct, h.ContextCfg) {
+	_, _, pct := ctxpkg.Store.GetTokenUsage(reqBody.SessionID, reqBody.Model)
+	if ctxpkg.ShouldBlock(pct, h.ContextCfg) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusTooManyRequests)
 		json.NewEncoder(w).Encode(map[string]string{
@@ -98,10 +107,10 @@ func (h *ChatHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// If approaching context limit, kick off summarization in background
-	if context.ShouldSummarize(pct, h.ContextCfg) {
-		sess := context.Store.GetOrCreate(reqBody.SessionID)
-		go func(s *context.Session, cfg context.Config) {
-			_ = context.Summarize(s, cfg)
+	if ctxpkg.ShouldSummarize(pct, h.ContextCfg) {
+		sess := ctxpkg.Store.GetOrCreate(reqBody.SessionID)
+		go func(s *ctxpkg.Session, cfg ctxpkg.Config) {
+			_ = ctxpkg.Summarize(s, cfg)
 		}(sess, h.ContextCfg)
 	}
 
@@ -123,8 +132,21 @@ func (h *ChatHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 	}
 
-	// Run the Agent Loop
-	_, err := h.Agent.Run(r.Context(), reqBody.SessionID, reqBody.Prompt, reqBody.Model, reqBody.Think, reqBody.ThinkLevel, state, emit)
+	// Run the Agent Loop on a context detached from the request, not r.Context()
+	// itself. r.Context() is cancelled the instant the client disconnects —
+	// which happens on an ordinary page navigation, since ChatPanel aborts its
+	// fetch on unmount — and that cancellation was propagating all the way
+	// into the Ollama call inside run.Step. The run would error out immediately
+	// with nothing to show for it: the assistant reply is only saved to the DB
+	// after the loop finishes normally (see agent.Run's "finalContent != """
+	// check), so a response that was most of the way through generating was
+	// silently discarded rather than merely undelivered. Detaching means the
+	// run keeps going and its answer gets saved even if nobody's watching;
+	// chatRunTimeout is only a backstop against a truly wedged call, not a
+	// limit meant to fire in normal use.
+	runCtx, cancel := context.WithTimeout(context.Background(), chatRunTimeout)
+	defer cancel()
+	_, err := h.Agent.Run(runCtx, reqBody.SessionID, reqBody.Prompt, reqBody.Model, reqBody.Think, reqBody.ThinkLevel, state, emit)
 	if err != nil {
 		emit("error", map[string]any{"message": err.Error()})
 	}
@@ -151,15 +173,15 @@ func (h *ChatHandler) GetContext(w http.ResponseWriter, r *http.Request) {
 	if model == "" {
 		model = "qwen2.5-coder:1.5b"
 	}
-	context.RefreshModelContextWindow(h.OllamaURL, model)
+	ctxpkg.RefreshModelContextWindow(h.OllamaURL, model)
 
-	session := context.Store.GetOrCreate(sessionID)
-	used, total, pct := context.Store.GetTokenUsage(sessionID, model)
+	session := ctxpkg.Store.GetOrCreate(sessionID)
+	used, total, pct := ctxpkg.Store.GetTokenUsage(sessionID, model)
 
 	zone := "green"
-	if context.ShouldBlock(pct, h.ContextCfg) {
+	if ctxpkg.ShouldBlock(pct, h.ContextCfg) {
 		zone = "red"
-	} else if context.ShouldSummarize(pct, h.ContextCfg) {
+	} else if ctxpkg.ShouldSummarize(pct, h.ContextCfg) {
 		zone = "yellow"
 	}
 
@@ -218,7 +240,7 @@ func (h *ChatHandler) ResetContext(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	context.Store.Reset(reqBody.SessionID)
+	ctxpkg.Store.Reset(reqBody.SessionID)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]bool{"ok": true})

@@ -14,7 +14,7 @@ func (c *Coordinator) IndexFile(ctx context.Context, workspaceID, root, path str
 	c.fileMu.Lock()
 	defer c.fileMu.Unlock()
 	file, skipped, scanErr := c.scannerSnapshot().ScanFile(ctx, root, path)
-	runID, runErr := c.DB.StartIndexRun(ctx, workspaceID, 1)
+	runID, runErr := c.DB.StartIncrementalIndexRun(ctx, workspaceID)
 	if runErr != nil {
 		return
 	}

@@ -551,10 +551,19 @@ func (d *DB) FileSummaryByHash(ctx context.Context, workspaceID, path, contentHa
 	return &item, nil
 }
 
-func (d *DB) LatestIndexStatus(ctx context.Context, workspaceID string, enrichmentApproved bool) (knowledge.IndexStatus, error) {
+// EnrichmentGate is the coordinator's in-memory view of what the user has
+// decided about enrichment for a workspace. None of it is persisted, so it has
+// to be passed in rather than read back out of the database.
+type EnrichmentGate struct {
+	Approved bool
+	Declined bool
+	Paused   bool
+}
+
+func (d *DB) LatestIndexStatus(ctx context.Context, workspaceID string, gate EnrichmentGate) (knowledge.IndexStatus, error) {
 	var item knowledge.IndexStatus
 	item.WorkspaceID = workspaceID
-	err := d.QueryRowContext(ctx, `SELECT id,status,processed,total,skipped,errors,started_at,completed_at,error FROM indexing_runs WHERE workspace_id=? ORDER BY started_at DESC LIMIT 1`, workspaceID).
+	err := d.QueryRowContext(ctx, `SELECT id,status,processed,total,skipped,errors,started_at,completed_at,error FROM indexing_runs WHERE workspace_id=? AND kind='full' ORDER BY started_at DESC LIMIT 1`, workspaceID).
 		Scan(&item.RunID, &item.Status, &item.Processed, &item.Total, &item.Skipped, &item.Errors, &item.StartedAt, &item.CompletedAt, &item.Error)
 	if err == sql.ErrNoRows {
 		item.Status = "not_indexed"
@@ -572,7 +581,16 @@ func (d *DB) LatestIndexStatus(ctx context.Context, workspaceID string, enrichme
 		// of falsely claiming "running" forever just because unclaimed jobs
 		// are still sitting in the queue (they'll resume on the next index run).
 		item.EnrichmentStatus = "cancelled"
-	case item.EnrichmentRemaining > 0 && !enrichmentApproved:
+	case item.EnrichmentRemaining > 0 && gate.Paused:
+		// Suspended mid-run by the user; queued jobs are intact and resuming
+		// picks up where it left off.
+		item.EnrichmentStatus = "paused"
+	case item.EnrichmentRemaining > 0 && gate.Declined && !gate.Approved:
+		// The user explicitly dismissed the approval prompt ("Not now") — keep
+		// reporting that instead of falling back to "pending_confirmation",
+		// which would make the card reappear on the very next status poll.
+		item.EnrichmentStatus = "declined"
+	case item.EnrichmentRemaining > 0 && !gate.Approved:
 		// Jobs are queued but the coordinator is holding off starting the AI
 		// model calls until the user explicitly approves — see
 		// Coordinator.ApproveEnrichment.
@@ -614,7 +632,7 @@ func (d *DB) KnowledgeOverview(ctx context.Context, workspaceID string) (knowled
 	// approximating false here just means this summary view's status field
 	// may lag one step behind the polled /index/status endpoint, which is
 	// the actual source of truth the frontend uses to drive the approval UI.
-	result.Status, _ = d.LatestIndexStatus(ctx, workspaceID, false)
+	result.Status, _ = d.LatestIndexStatus(ctx, workspaceID, EnrichmentGate{})
 	result.Facts, _ = d.ListFacts(ctx, workspaceID)
 	result.Symbols, _ = d.ListImportantSymbols(ctx, workspaceID, 100)
 	result.Decisions, _ = d.ListDecisions(ctx, workspaceID)
@@ -1096,8 +1114,19 @@ func (d *DB) KnowledgeForPath(ctx context.Context, workspaceID, path string) (kn
 }
 
 func (d *DB) StartIndexRun(ctx context.Context, workspaceID string, total int) (string, error) {
+	return d.startIndexRun(ctx, workspaceID, total, "full")
+}
+
+// StartIncrementalIndexRun records a single-file re-index triggered by the file
+// watcher. Tagged 'incremental' so LatestIndexStatus can ignore it — these fire
+// on every save and would otherwise overwrite a full scan's progress in the UI.
+func (d *DB) StartIncrementalIndexRun(ctx context.Context, workspaceID string) (string, error) {
+	return d.startIndexRun(ctx, workspaceID, 1, "incremental")
+}
+
+func (d *DB) startIndexRun(ctx context.Context, workspaceID string, total int, kind string) (string, error) {
 	id := NewID()
-	_, err := d.ExecContext(ctx, `INSERT INTO indexing_runs(id,workspace_id,status,total) VALUES(?,?,'running',?)`, id, workspaceID, total)
+	_, err := d.ExecContext(ctx, `INSERT INTO indexing_runs(id,workspace_id,status,total,kind) VALUES(?,?,'running',?,?)`, id, workspaceID, total, kind)
 	return id, err
 }
 func (d *DB) UpdateIndexRun(ctx context.Context, id, status string, processed, skipped, errors int, message string) error {

@@ -162,8 +162,13 @@ func main() {
 	knowledgeHandler := handlers.NewKnowledgeHandler(database, indexCoordinator, indexBroker)
 	knowledgeHandler.RegisterRoutes(mux)
 
-	settingsHandler := handlers.NewSettingsHandler(filepath.Join("data", ".nativestudio_settings.json"))
+	terminalHandler := handlers.NewTerminalHandler(database)
+	terminalHandler.RegisterRoutes(mux)
+
+	settingsPath := filepath.Join("data", ".nativestudio_settings.json")
+	settingsHandler := handlers.NewSettingsHandler(settingsPath)
 	settingsHandler.RegisterRoutes(mux)
+	agent.SetSettingsPath(settingsPath)
 
 	changesHandler := handlers.NewChangesHandler(database, indexCoordinator)
 	changesHandler.RegisterRoutes(mux)

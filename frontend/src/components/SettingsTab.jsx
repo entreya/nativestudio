@@ -1,13 +1,13 @@
 import React from 'react';
-import { CheckOutlined, FormatPainterOutlined, FontColorsOutlined } from '@ant-design/icons';
-import { Typography, Tag, Divider, Row, Col, InputNumber, Switch, Select, Tabs } from 'antd';
+import { CheckOutlined, FormatPainterOutlined, FontColorsOutlined, ThunderboltOutlined } from '@ant-design/icons';
+import { Typography, Tag, Divider, Row, Col, InputNumber, Switch, Select, Slider, Tabs } from 'antd';
 import { studioThemes } from '../themes';
 import { useAppState } from '../state/useAppState';
 
 const { Text, Title } = Typography;
 
 export default function SettingsTab() {
-  const { themeID, selectTheme, fontSettings, updateFontSettings, editorSettings, updateEditorSettings } = useAppState();
+  const { themeID, selectTheme, fontSettings, updateFontSettings, editorSettings, updateEditorSettings, agentSettings, updateAgentSettings } = useAppState();
 
   // Group themes by their 'pairId' so we can show Light and Dark side-by-side
   const themePairs = {};
@@ -271,10 +271,89 @@ export default function SettingsTab() {
     </div>
   );
 
+  const agentContent = (
+    <div style={{ marginTop: 24 }}>
+      <Title level={4} style={{ color: 'var(--studio-text)', marginBottom: 8 }}>
+        <ThunderboltOutlined style={{ marginRight: 8 }} /> Agent Behavior
+      </Title>
+      <Text style={{ color: 'var(--studio-muted)', display: 'block', marginBottom: 24 }}>
+        Tune how the local AI agent reasons before responding.
+      </Text>
+
+      <Row gutter={[32, 24]}>
+        <Col span={24}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <Text strong style={{ color: 'var(--studio-text)' }}>Max Thinking Tokens</Text>
+              <InputNumber
+                min={100} max={20000} step={100}
+                value={agentSettings?.maxThinkingTokens || 1200}
+                onChange={v => updateAgentSettings({ maxThinkingTokens: v })}
+                style={{ width: 110 }}
+              />
+            </div>
+            <Text style={{ color: 'var(--studio-muted)', fontSize: 12, marginBottom: 8 }}>
+              How long the model may reason before it's cut off and nudged to act. Lower it for snappier but less thorough
+              answers; raise it for more thorough reasoning on hard requests.
+            </Text>
+            <Slider
+              min={100} max={20000} step={100}
+              value={agentSettings?.maxThinkingTokens || 1200}
+              onChange={v => updateAgentSettings({ maxThinkingTokens: v })}
+              marks={{ 100: 'Fast', 1200: 'Default', 20000: 'Thorough' }}
+            />
+          </div>
+        </Col>
+        <Col span={24}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <Text strong style={{ color: 'var(--studio-text)' }}>Response Creativity</Text>
+              <InputNumber
+                min={0} max={1} step={0.1}
+                value={agentSettings?.temperature ?? 0.7}
+                onChange={v => updateAgentSettings({ temperature: v })}
+                style={{ width: 110 }}
+              />
+            </div>
+            <Text style={{ color: 'var(--studio-muted)', fontSize: 12, marginBottom: 8 }}>
+              Controls how much the model varies its wording and choices between runs (this is what's usually called
+              "temperature"). Lower it toward Precise for consistent, repeatable answers on the same prompt; raise it
+              toward Creative for more varied phrasing and less predictable output.
+            </Text>
+            <Slider
+              min={0} max={1} step={0.1}
+              value={agentSettings?.temperature ?? 0.7}
+              onChange={v => updateAgentSettings({ temperature: v })}
+              marks={{ 0: 'Precise', 0.7: 'Default', 1: 'Creative' }}
+            />
+          </div>
+        </Col>
+        <Col span={24}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <Text strong style={{ color: 'var(--studio-text)' }}>Force-Unload Model Every N Chats</Text>
+              <InputNumber
+                min={0} max={2000} step={10}
+                value={agentSettings?.forceUnloadAfterChats ?? 100}
+                onChange={v => updateAgentSettings({ forceUnloadAfterChats: v })}
+                style={{ width: 110 }}
+              />
+            </div>
+            <Text style={{ color: 'var(--studio-muted)', fontSize: 12 }}>
+              Periodically frees the model from memory after this many chat requests, even during continuous back-to-back use where the
+              normal idle timeout never gets a chance to fire. Set to 0 to disable and rely on the idle timeout alone.
+            </Text>
+          </div>
+        </Col>
+      </Row>
+    </div>
+  );
+
   const tabItems = [
     { key: 'appearance', label: 'Appearance', children: appearanceContent },
     { key: 'typography', label: 'Typography', children: typographyContent },
-    { key: 'editor', label: 'Editor', children: editorContent }
+    { key: 'editor', label: 'Editor', children: editorContent },
+    { key: 'agent', label: 'Agent', children: agentContent }
   ];
 
   return (

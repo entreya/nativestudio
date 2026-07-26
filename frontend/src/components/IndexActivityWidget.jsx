@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Button } from 'antd';
-import { CheckOutlined, CloseOutlined, LoadingOutlined, StopOutlined } from '@ant-design/icons';
+import { CheckOutlined, CloseOutlined, LoadingOutlined, PauseOutlined, PlayCircleOutlined, StopOutlined } from '@ant-design/icons';
 
 /**
  * IndexActivityWidget
@@ -14,6 +14,9 @@ import { CheckOutlined, CloseOutlined, LoadingOutlined, StopOutlined } from '@an
  *   processes       Array<ProcessCard>
  *   onStop          () => void        stop the active scan/enrichment
  *   onApprove       () => void        approve a pending enrichment run
+ *   onDecline       () => void        dismiss a pending enrichment run ("Not now")
+ *   onPause         () => void        suspend a running enrichment (queue kept)
+ *   onResume        () => void        continue a paused enrichment
  *
  * ProcessCard shape:
  *   id        string
@@ -24,7 +27,7 @@ import { CheckOutlined, CloseOutlined, LoadingOutlined, StopOutlined } from '@an
  *   stats     Object<string,string>
  *   progress  number | null    0-100 or null = indeterminate
  */
-export default function IndexActivityWidget({ processes = [], onStop, onApprove }) {
+export default function IndexActivityWidget({ processes = [], onStop, onApprove, onDecline, onPause, onResume }) {
   const [dismissed, setDismissed] = useState({});
   const dismissTimers = useRef({});
 
@@ -64,7 +67,17 @@ export default function IndexActivityWidget({ processes = [], onStop, onApprove 
                 <span className={`idx-status-dot idx-status-dot-${proc.status}`} />
               )}
               <span className="idx-card-title">{proc.label}</span>
-              {onStop && proc.status === 'running' && (
+              {onPause && proc.pausable && proc.status === 'running' && (
+                <button className="idx-icon-btn" onClick={onPause} title="Pause" aria-label="Pause">
+                  <PauseOutlined />
+                </button>
+              )}
+              {onResume && proc.status === 'paused' && (
+                <button className="idx-icon-btn" onClick={onResume} title="Resume" aria-label="Resume">
+                  <PlayCircleOutlined />
+                </button>
+              )}
+              {onStop && (proc.status === 'running' || proc.status === 'paused') && (
                 <button className="idx-icon-btn" onClick={onStop} title="Stop" aria-label="Stop">
                   <StopOutlined />
                 </button>
@@ -85,7 +98,7 @@ export default function IndexActivityWidget({ processes = [], onStop, onApprove 
               <div className="idx-confirm-row">
                 <span className="idx-confirm-hint">This calls the AI model for each file — nothing runs until you approve it.</span>
                 <div className="idx-confirm-actions">
-                  <Button size="small" type="text" onClick={onStop} icon={<CloseOutlined />}>Not now</Button>
+                  <Button size="small" type="text" onClick={onDecline} icon={<CloseOutlined />}>Not now</Button>
                   <Button size="small" type="primary" onClick={onApprove} icon={<CheckOutlined />}>Start enriching</Button>
                 </div>
               </div>
