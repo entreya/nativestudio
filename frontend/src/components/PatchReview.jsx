@@ -52,7 +52,7 @@ export default function PatchReview({ patches, onApprove, onReject, onApproveAll
         <Card
           key={patch.patch_id}
           size="small"
-          title={<Space size={7}><FileOutlined /><Text ellipsis style={{ maxWidth: 420 }}>{patch.file_path}</Text><Tag color={patch.operation === 'delete' ? 'error' : patch.operation === 'create' ? 'success' : 'processing'}>{patch.operation.toUpperCase()}</Tag></Space>}
+          title={<Space size={7}><FileOutlined /><Text ellipsis style={{ maxWidth: 420 }}>{patch.file_path}</Text><Tag color={patch.operation === 'delete' ? 'error' : patch.operation === 'create' ? 'success' : 'processing'}>{(patch.operation || 'change').toUpperCase()}</Tag></Space>}
           styles={{ body: { padding: 10 } }}
         >
           <DiffView diff={patch.diff} />

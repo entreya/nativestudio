@@ -403,6 +403,21 @@ func (run *AgentRun) Step(
 					emit("command_staged", map[string]any{
 						"run_id": output["run_id"], "command": output["command"], "cwd": output["cwd"],
 					})
+				} else if patches, ok := output["patches"].([]map[string]any); ok && len(patches) > 0 {
+					// rename_symbol (and any future tool that stages several files in
+					// one call) reports each staged file as an entry under "patches"
+					// rather than a single patch at the top level. Live bug: falling
+					// through to the branch below read output["patch_id"] /
+					// ["operation"] / etc, none of which exist on this shape, so every
+					// field came back a bare Go nil — JSON-encoded as null — which
+					// crashed PatchReview.jsx's patch.operation.toUpperCase() and
+					// blanked the whole page.
+					for _, patch := range patches {
+						emit("patch_staged", map[string]any{
+							"patch_id": patch["patch_id"], "file_path": patch["file_path"],
+							"operation": patch["operation"], "diff": patch["diff"],
+						})
+					}
 				} else if staged {
 					emit("patch_staged", map[string]any{
 						"patch_id": output["patch_id"], "file_path": output["file_path"],

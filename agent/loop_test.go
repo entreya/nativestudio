@@ -407,6 +407,68 @@ func TestStepStagesReviewablePatch(t *testing.T) {
 	}
 }
 
+// TestStepEmitsOnePatchStagedPerRenamedFile is the regression test for a live
+// crash: rename_symbol stages several files (a create+delete pair for the
+// renamed file, plus a modify for every other file that referenced it) and
+// reports them as a "patches" array in its result, not as a single patch at
+// the top level. Step's patch_staged emission was written before
+// rename_symbol existed and only knew the single-patch shape — for a
+// multi-patch result it read output["patch_id"]/["operation"]/etc, none of
+// which exist there, so every field came back a bare Go nil, JSON-encoded as
+// null. The frontend's PatchReview component did patch.operation.toUpperCase()
+// on that null and crashed, unmounting the whole page (blank screen) the
+// moment a rename was staged.
+func TestStepEmitsOnePatchStagedPerRenamedFile(t *testing.T) {
+	root := t.TempDir()
+	mustWriteFile(t, filepath.Join(root, "controllers", "SiteController.php"), "<?php\nclass SiteController {}\n")
+	mustWriteFile(t, filepath.Join(root, "config", "routes.php"), "<?php\nreturn ['site' => SiteController::class];\n")
+
+	database, err := db.Open(filepath.Join(t.TempDir(), "agent.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	project, err := database.CreateProject("project", "Project", root, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.CreateSession("session", project.ID, "test", "Rename test"); err != nil {
+		t.Fatal(err)
+	}
+
+	withTransport(t, scriptedTransport(t, []string{
+		`{"message":{"tool_calls":[{"function":{"name":"rename_symbol","arguments":{"old_name":"SiteController","new_name":"KlopController"}}}]},"done":true}`,
+	}))
+
+	run := &AgentRun{RunID: "run", SessionID: "session", Model: "test", MaxSteps: 2, DB: database}
+	var staged []map[string]any
+	done, _, err := run.Step(context.Background(), nil, NewRegistry(root), "http://ollama.test", func(event string, data any) {
+		if event == "patch_staged" {
+			m, _ := data.(map[string]any)
+			staged = append(staged, m)
+		}
+	})
+	if err != nil || done {
+		t.Fatalf("unexpected result: done=%v err=%v", done, err)
+	}
+
+	// create (new file) + delete (old file) + modify (routes.php reference) = 3.
+	if len(staged) != 3 {
+		t.Fatalf("expected one patch_staged event per staged file (3), got %d: %#v", len(staged), staged)
+	}
+	for _, entry := range staged {
+		if op, _ := entry["operation"].(string); op == "" {
+			t.Fatalf("patch_staged event has no operation (this is the live crash): %#v", entry)
+		}
+		if path, _ := entry["file_path"].(string); path == "" {
+			t.Fatalf("patch_staged event has no file_path: %#v", entry)
+		}
+		if id, _ := entry["patch_id"].(string); id == "" {
+			t.Fatalf("patch_staged event has no patch_id: %#v", entry)
+		}
+	}
+}
+
 // TestThinkingBudgetStopsRunawayReasoning reproduces (deterministically, via a
 // mocked transport rather than waiting on a real slow model) the failure mode
 // found live: a model that streams thinking chunks indefinitely without ever

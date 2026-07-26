@@ -79,7 +79,26 @@ func executeRenameSymbol(ctx context.Context, input ToolInput, meta ToolMeta) (T
 	staged := make([]map[string]any, 0, len(matches)+1)
 	boundary := regexp.MustCompile(`\b` + regexp.QuoteMeta(oldName) + `\b`)
 
-	for _, match := range matches {
+	// A file named after the symbol goes through the create+delete path below
+	// instead of the ordinary modify path: staging a "modify" for it too would
+	// rewrite its content in place at the OLD path right before deleting that
+	// same path, which is redundant work and — worse — a real hazard if it's
+	// approved without the delete, since it recreates the exact PSR-4
+	// mismatch (new class name, old filename) this tool exists to prevent.
+	renameMatchIndex := -1
+	for i, match := range matches {
+		base := filepath.Base(match.RelativePath)
+		extension := filepath.Ext(base)
+		if strings.TrimSuffix(base, extension) == oldName {
+			renameMatchIndex = i
+			break
+		}
+	}
+
+	for i, match := range matches {
+		if i == renameMatchIndex {
+			continue
+		}
 		updated := boundary.ReplaceAllString(match.Content, newName)
 		if updated == match.Content {
 			continue
@@ -98,13 +117,10 @@ func executeRenameSymbol(ctx context.Context, input ToolInput, meta ToolMeta) (T
 	// The file rename. Staged as a create+delete pair because the patch model
 	// has no rename operation — approving both is what actually moves it.
 	renamedFile := ""
-	for _, match := range matches {
+	if renameMatchIndex >= 0 {
+		match := matches[renameMatchIndex]
 		base := filepath.Base(match.RelativePath)
 		extension := filepath.Ext(base)
-		if strings.TrimSuffix(base, extension) != oldName {
-			continue
-		}
-
 		newRelative := filepath.ToSlash(filepath.Join(filepath.Dir(match.RelativePath), newName+extension))
 		newContent := boundary.ReplaceAllString(match.Content, newName)
 
@@ -125,7 +141,6 @@ func executeRenameSymbol(ctx context.Context, input ToolInput, meta ToolMeta) (T
 			staged = append(staged, output)
 		}
 		renamedFile = match.RelativePath + " → " + newRelative
-		break
 	}
 
 	summary := fmt.Sprintf("Renamed %s to %s across %d file(s)", oldName, newName, len(matches))
