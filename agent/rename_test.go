@@ -167,3 +167,78 @@ func TestRenameSymbolReportsWhenSymbolIsAbsent(t *testing.T) {
 		t.Fatalf("expected a clear symbol_not_found result, got %+v", result)
 	}
 }
+
+// TestRenameSymbolFinishesAnAlreadyHalfDoneRename is the regression test for
+// a live bug: a file (controllers/SiteController.php) already declared
+// "class KlopController" — renamed by hand at some point without renaming
+// its file, the exact PSR-4 mismatch this tool exists to prevent, just
+// reached from the other direction. Asking to rename SiteController to
+// KlopController again correctly found no SiteController symbol and
+// returned a bare symbol_not_found, which gave the small model in
+// NativeStudio nothing to work with — it spent several rounds of
+// increasingly confused reasoning trying to figure out what must have
+// happened instead of being told directly. rename_symbol should recognize
+// this specific state and finish the job (rename the file) in one shot.
+func TestRenameSymbolFinishesAnAlreadyHalfDoneRename(t *testing.T) {
+	agentInstance, root, meta := renameTestEnvironment(t)
+	writeRenameFile(t, root, "controllers/SiteController.php",
+		"<?php\nnamespace app\\controllers;\nclass KlopController extends Controller\n{\n}\n")
+
+	result, err := executeRenameSymbol(context.Background(), ToolInput{
+		"old_name": "SiteController", "new_name": "KlopController",
+	}, meta)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.OK {
+		t.Fatalf("expected the tool to finish the half-done rename instead of erroring, got %+v", result)
+	}
+
+	content := result.Content.(map[string]any)
+	if renamed, _ := content["already_renamed"].(bool); !renamed {
+		t.Errorf("expected already_renamed: true so the model can tell this apart from a fresh rename, got %+v", content)
+	}
+	renamedFile, _ := content["file_renamed"].(string)
+	if !strings.Contains(renamedFile, "KlopController.php") {
+		t.Fatalf("expected the file to be renamed to KlopController.php, got %q", renamedFile)
+	}
+
+	patches, err := agentInstance.DB.ListPatches(context.Background(), "session", "pending")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var created, deleted bool
+	for _, patch := range patches {
+		if patch.Operation == "create" && strings.HasSuffix(patch.FilePath, "KlopController.php") {
+			created = true
+			if !strings.Contains(patch.NewContent, "class KlopController") {
+				t.Errorf("new file should keep the already-renamed class declaration:\n%s", patch.NewContent)
+			}
+		}
+		if patch.Operation == "delete" && strings.HasSuffix(patch.FilePath, "SiteController.php") {
+			deleted = true
+		}
+	}
+	if !created || !deleted {
+		t.Fatalf("expected a create+delete pair for the file rename (created=%v deleted=%v)", created, deleted)
+	}
+}
+
+// TestRenameSymbolDoesNotConfuseAnUnrelatedFileForAHalfDoneRename makes sure
+// the half-done-rename detection only fires when the filename itself matches
+// oldName — a file that happens to mention newName for some unrelated reason
+// must not be mistaken for a completed rename.
+func TestRenameSymbolDoesNotConfuseAnUnrelatedFileForAHalfDoneRename(t *testing.T) {
+	_, root, meta := renameTestEnvironment(t)
+	writeRenameFile(t, root, "notes.php", "<?php // see KlopController for reference\n")
+
+	result, err := executeRenameSymbol(context.Background(), ToolInput{
+		"old_name": "SiteController", "new_name": "KlopController",
+	}, meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.OK || result.Error != "symbol_not_found" {
+		t.Fatalf("expected a plain symbol_not_found (no file is named SiteController), got %+v", result)
+	}
+}

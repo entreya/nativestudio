@@ -71,6 +71,9 @@ func executeRenameSymbol(ctx context.Context, input ToolInput, meta ToolMeta) (T
 		return ToolResult{OK: false, Error: err.Error()}, nil
 	}
 	if len(matches) == 0 {
+		if misnamed, found := findMisnamedFile(meta.WorkspaceRoot, oldName, newName); found {
+			return finishMisnamedFileRename(ctx, meta, oldName, newName, misnamed)
+		}
 		return ToolResult{OK: false, Error: "symbol_not_found", Content: map[string]any{
 			"message": fmt.Sprintf("No file in the workspace mentions %q.", oldName),
 		}}, nil
@@ -159,20 +162,61 @@ func executeRenameSymbol(ctx context.Context, input ToolInput, meta ToolMeta) (T
 	}}, nil
 }
 
+// finishMisnamedFileRename stages the file half of a rename whose symbol half
+// was already done — findMisnamedFile has already confirmed misnamed's
+// content declares newName under a filename that still says oldName. Returns
+// an OK result unconditionally (there is no further ambiguity to resolve
+// here): the fact stated in the summary is enough context for the model to
+// report completion directly instead of asking the user anything.
+func finishMisnamedFileRename(ctx context.Context, meta ToolMeta, oldName, newName string, misnamed symbolMatch) (ToolResult, error) {
+	extension := filepath.Ext(misnamed.RelativePath)
+	newRelative := filepath.ToSlash(filepath.Join(filepath.Dir(misnamed.RelativePath), newName+extension))
+
+	createResult, err := stagePatch(ctx, meta, newRelative, "create",
+		computeUnifiedDiff(newRelative, "", misnamed.Content), misnamed.Content, "")
+	if err != nil || !createResult.OK {
+		return createResult, err
+	}
+	deleteResult, err := stagePatch(ctx, meta, misnamed.RelativePath, "delete",
+		computeUnifiedDiff(misnamed.RelativePath, misnamed.Content, ""), "", misnamed.Content)
+	if err != nil || !deleteResult.OK {
+		return deleteResult, err
+	}
+
+	staged := make([]map[string]any, 0, 2)
+	if output, ok := createResult.Content.(map[string]any); ok {
+		staged = append(staged, output)
+	}
+	if output, ok := deleteResult.Content.(map[string]any); ok {
+		staged = append(staged, output)
+	}
+
+	renamedFile := misnamed.RelativePath + " → " + newRelative
+	return ToolResult{OK: true, Content: map[string]any{
+		"staged": true,
+		"summary": fmt.Sprintf(
+			"%s no longer exists as a symbol — %s already declares %s (its filename just didn't match yet, a PSR-4 mismatch). Renamed the file to match: %s",
+			oldName, misnamed.RelativePath, newName, renamedFile,
+		),
+		"already_renamed": true,
+		"files":           1,
+		"file_renamed":    renamedFile,
+		"patches":         staged,
+	}}, nil
+}
+
 type symbolMatch struct {
 	RelativePath string
 	Content      string
 }
 
-// findSymbolReferences returns every text file in the workspace containing
-// oldName as a whole word. Deliberately a whole-workspace scan: the reason
-// renames broke before was that only the obvious file got updated, leaving
-// references elsewhere pointing at a symbol that no longer exists.
-func findSymbolReferences(workspaceRoot, oldName string) ([]symbolMatch, error) {
-	boundary := regexp.MustCompile(`\b` + regexp.QuoteMeta(oldName) + `\b`)
-	var matches []symbolMatch
-
-	err := filepath.WalkDir(workspaceRoot, func(path string, entry os.DirEntry, err error) error {
+// walkTextFiles visits every text file in the workspace, skipping hidden and
+// vendor-ish directories, anything binary, and anything over
+// renameMaxFileSize. Shared by findSymbolReferences and findMisnamedFile so
+// the two walks (one keyed on file content, one on filename) stay in sync
+// about what counts as a file worth looking at.
+func walkTextFiles(workspaceRoot string, visit func(relativePath, content string)) error {
+	return filepath.WalkDir(workspaceRoot, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
@@ -194,17 +238,60 @@ func findSymbolReferences(workspaceRoot, oldName string) ([]symbolMatch, error) 
 		if readErr != nil || looksBinary(data) {
 			return nil
 		}
-		if !boundary.Match(data) {
-			return nil
-		}
 		relative, relErr := filepath.Rel(workspaceRoot, path)
 		if relErr != nil {
 			return nil
 		}
-		matches = append(matches, symbolMatch{RelativePath: filepath.ToSlash(relative), Content: string(data)})
+		visit(filepath.ToSlash(relative), string(data))
 		return nil
 	})
+}
+
+// findSymbolReferences returns every text file in the workspace containing
+// oldName as a whole word. Deliberately a whole-workspace scan: the reason
+// renames broke before was that only the obvious file got updated, leaving
+// references elsewhere pointing at a symbol that no longer exists.
+func findSymbolReferences(workspaceRoot, oldName string) ([]symbolMatch, error) {
+	boundary := regexp.MustCompile(`\b` + regexp.QuoteMeta(oldName) + `\b`)
+	var matches []symbolMatch
+
+	err := walkTextFiles(workspaceRoot, func(relativePath, content string) {
+		if boundary.MatchString(content) {
+			matches = append(matches, symbolMatch{RelativePath: relativePath, Content: content})
+		}
+	})
 	return matches, err
+}
+
+// findMisnamedFile looks for the PSR-4-mismatch state rename_symbol exists to
+// prevent, approached from the other direction: a file whose name still says
+// oldName, but whose content already declares newName as a whole word —
+// meaning the symbol was already renamed (by hand, or by an older tool) but
+// its file wasn't. Without this check, asking to rename a symbol that's
+// already been renamed returns a bare "not found", which gives a small model
+// nothing to work with and — observed live — sends it into several rounds of
+// increasingly confused re-reasoning about what must have happened instead of
+// the one-line fact this function establishes directly.
+func findMisnamedFile(workspaceRoot, oldName, newName string) (symbolMatch, bool) {
+	boundary := regexp.MustCompile(`\b` + regexp.QuoteMeta(newName) + `\b`)
+	var found symbolMatch
+	ok := false
+	_ = walkTextFiles(workspaceRoot, func(relativePath, content string) {
+		if ok {
+			return
+		}
+		base := filepath.Base(relativePath)
+		extension := filepath.Ext(base)
+		if strings.TrimSuffix(base, extension) != oldName {
+			return
+		}
+		if !boundary.MatchString(content) {
+			return
+		}
+		found = symbolMatch{RelativePath: relativePath, Content: content}
+		ok = true
+	})
+	return found, ok
 }
 
 const renameMaxFileSize = 2 << 20
