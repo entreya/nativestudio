@@ -3,6 +3,7 @@ import { CheckOutlined, FormatPainterOutlined, FontColorsOutlined, ThunderboltOu
 import { Typography, Tag, Divider, Row, Col, InputNumber, Switch, Select, Slider, Tabs } from 'antd';
 import { studioThemes } from '../themes';
 import { useAppState } from '../state/useAppState';
+import SearchEnginesSettings from './SearchEnginesSettings';
 
 const { Text, Title } = Typography;
 
@@ -353,7 +354,8 @@ export default function SettingsTab() {
     { key: 'appearance', label: 'Appearance', children: appearanceContent },
     { key: 'typography', label: 'Typography', children: typographyContent },
     { key: 'editor', label: 'Editor', children: editorContent },
-    { key: 'agent', label: 'Agent', children: agentContent }
+    { key: 'agent', label: 'Agent', children: agentContent },
+    { key: 'search', label: 'Search Engines', children: <SearchEnginesSettings /> },
   ];
 
   return (

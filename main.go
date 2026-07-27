@@ -178,6 +178,8 @@ func main() {
 	commandHandler.RegisterRoutes(mux)
 	databaseHandler := handlers.NewDatabaseHandler(database, cfg.OllamaURL, cfg.DefaultModel)
 	databaseHandler.RegisterRoutes(mux)
+	searchEnginesHandler := handlers.NewSearchEnginesHandler(cfg.OllamaURL, cfg.DefaultModel)
+	searchEnginesHandler.RegisterRoutes(mux)
 
 	// Serve static frontend files (from the React build). The frontend is a
 	// client-routed SPA (react-router), so any path that isn't a real file in

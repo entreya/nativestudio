@@ -80,6 +80,12 @@ type storedSearchEngines struct {
 // the builtin defaults. Reads fresh each call (the file is tiny) so a change
 // in Settings takes effect on the next search with no restart, matching how
 // currentMaxThinkingTokens already behaves.
+// LoadSearchEngines is the exported entry point for the Settings UI to list
+// every configured engine (builtin and custom, enabled or not) — the agent's
+// own search path uses enabledSearchEngines internally, which is this same
+// data filtered down to what should actually be queried.
+func LoadSearchEngines() []SearchEngine { return loadSearchEngines() }
+
 func loadSearchEngines() []SearchEngine {
 	engines := builtinSearchEngines()
 
