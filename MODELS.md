@@ -22,6 +22,14 @@ For comparison, several much larger and more heavily-marketed 2026 releases are 
 - **`nomic-embed-text`** for the embedding model (semantic knowledge search) — small, fast, and what the indexer is tuned against.
 - If you have more RAM/VRAM to spare, larger dense models (Qwen3 8B-14B, similar-tier Llama/Mistral models) generally do better on both raw coding quality and tool-calling — the tradeoff is speed and memory, not correctness.
 
+### If you have room for an 8B model: IBM Granite 4.1 8B
+
+Dense (not MoE), Apache 2.0, and matches or beats IBM's own previous 32B MoE model on most benchmarks (87.2% HumanEval) at roughly a quarter the parameters. It fits this guide's own criteria — dense architecture, permissive license, strong coding score — better than most alternatives at this size. The one thing not yet verified for it specifically is dedicated multi-step *tool-calling* reliability (the Qwen3.5 4B / Nemotron Nano 4B numbers above come from a benchmark built for exactly that; Granite's numbers are general coding/reasoning benchmarks). Worth trying if you have the RAM for an 8B model, but test it against nativestudio's actual tools before trusting it over a model with a proven tool-calling track record.
+
+### A note on "small but as capable as Claude"
+
+No open, laptop-sized model is that — model quality genuinely scales with training compute and parameter count, and nothing in the 4B-8B range closes that gap, no matter how good its benchmark scores look. What these models *can* do is be reliable within a narrow, well-supported task (calling the right tool, editing the right file) when the surrounding harness — this app's structured tools, patch review, and verified memory — carries the rest of the weight. That division of labor, not a bigger model, is what actually makes a small local model usable for real work.
+
 ## A caveat, and how to actually decide
 
 The tool-calling numbers above come from a *generic* API tool-calling benchmark (weather lookups, currency conversion), not from coding-agent-specific tasks — they're a strong signal, not a guarantee that any given model will behave well on *this* app's specific tools and prompts. Model behavior on small local models can also be surprisingly inconsistent between models that look similar on paper: two similarly-sized models from the same family have been observed, in this project's own testing, to behave very differently on messy or mixed-language prompts.
